@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Wrangler / Cloudflare Workers
+.wrangler/
+.wrangler-logs/
+.miniflare/
+
+# Test coverage
+coverage/
+
+# Environment / secrets
+.env
+.env.*
+.dev.vars
+
+# Build artifacts
+dist/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*

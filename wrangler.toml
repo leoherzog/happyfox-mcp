@@ -1,0 +1,25 @@
+name = "happyfox-mcp-adapter"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[env.production]
+name = "happyfox-mcp-adapter-prod"
+
+[env.development]
+name = "happyfox-mcp-adapter-dev"
+
+# Environment variables (set in Cloudflare dashboard or via wrangler secret):
+# ALLOWED_ORIGINS - Comma-separated list of allowed CORS origins (default: localhost)
+
+# Required secret (set via: wrangler secret put MCP_SESSION_SECRET):
+# MCP_SESSION_SECRET - Secret key for session token signing (32+ characters recommended)
+#                      Required for MCP 2025-11-25 Streamable HTTP session management
+
+# Authentication is provided via HTTP headers:
+# X-HappyFox-ApiKey - HappyFox API key
+# X-HappyFox-AuthCode - HappyFox auth code
+# X-HappyFox-Account - HappyFox account subdomain
+# X-HappyFox-Region - "us" or "eu" (default: "us")
+
+# TypeScript is automatically compiled by Wrangler
+# No build configuration needed
