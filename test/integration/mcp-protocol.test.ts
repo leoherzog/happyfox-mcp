@@ -44,7 +44,7 @@ describe("MCP Protocol Compliance", () => {
       const result = body.result as Record<string, unknown>;
       const serverInfo = result.serverInfo as Record<string, unknown>;
 
-      expect(serverInfo.name).toBe("happyfox-mcp-adapter");
+      expect(serverInfo.name).toBe("happyfox-mcp");
       expect(serverInfo.version).toBeDefined();
     });
 

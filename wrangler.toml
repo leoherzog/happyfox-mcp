@@ -1,12 +1,30 @@
-name = "happyfox-mcp-adapter"
+name = "happyfox-mcp"
 main = "src/index.ts"
-compatibility_date = "2024-12-01"
+compatibility_date = "2025-11-17"
+
+[placement]
+mode = "smart"
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
 
 [env.production]
-name = "happyfox-mcp-adapter-prod"
+name = "happyfox-mcp-prod"
 
 [env.development]
-name = "happyfox-mcp-adapter-dev"
+name = "happyfox-mcp-dev"
 
 # Environment variables (set in Cloudflare dashboard or via wrangler secret):
 # ALLOWED_ORIGINS - Comma-separated list of allowed CORS origins (default: localhost)

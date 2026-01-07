@@ -187,3 +187,18 @@ Based on available documentation and search results:
 - **Concurrent Requests:** The API does not support concurrent calls to the same ticket's endpoints.
 - **Bulk Operations:** Maximum 100 tickets/contacts per bulk request.
 - **Contact/Contact Group Deletion:** The API does not support deleting contacts or contact groups.
+
+## Ticket Query Syntax
+
+The `q` parameter on `/tickets/` supports structured filtering with the following syntax:
+
+- **assignee:** `assignee:email@example.com` or `assignee:username` or `assignee:--none` (unassigned) or `assignee:--any` (all assigned). Note: Numeric staff IDs are NOT supported.
+- **priority:** `priority:"High"` (comma-separated for multiple)
+- **tag:** `tag:"urgent"` (case-sensitive, comma-separated)
+- **contact:** `contact:"email@example.com"`
+- **duedate:** `duedate:today`, `duedate:overdue`, `duedate:tomorrow`, `duedate:"next 7 days"`
+- **unresponded:** `unresponded:true`
+- **breached:** `breached:true` (SLA breaches)
+- **has_attachments:** `has_attachments:true`
+
+Combine multiple filters with `+`: `q=assignee:user@example.com+priority:"High"`

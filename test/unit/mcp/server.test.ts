@@ -158,7 +158,7 @@ describe("MCPServer", () => {
       const result = await server.handleMessage(request);
 
       expect(result?.result?.serverInfo).toEqual({
-        name: "happyfox-mcp-adapter",
+        name: "happyfox-mcp",
         version: "2.0.0"
       });
     });

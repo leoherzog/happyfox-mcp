@@ -1,5 +1,5 @@
 {
-  "name": "happyfox-mcp-adapter",
+  "name": "happyfox-mcp",
   "version": "0.0.1",
   "description": "Cloudflare Worker MCP Server Adapter for HappyFox REST API",
   "main": "src/index.ts",

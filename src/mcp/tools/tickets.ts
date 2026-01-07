@@ -39,7 +39,7 @@ export class TicketTools {
             size: { type: 'number', description: 'Page size (default: 50, max: 50)' },
             category: { type: 'string', description: 'Filter by category ID' },
             status: { type: 'string', description: 'Filter by status ID' },
-            query: { type: 'string', description: 'Search query (use key:value syntax for advanced filters like assignee:none, priority:"High", tag:"urgent")' },
+            query: { type: 'string', description: 'Search query (use key:value syntax for advanced filters like assignee:email@example.com, assignee:--none, priority:"High", tag:"urgent")' },
             sort_by: { type: 'string', description: 'Sort field' },
             minify_response: { type: 'boolean', description: 'Return minimal ticket data for faster response' },
             fields: { type: 'array', items: { type: 'string' }, description: 'Specific fields to return (e.g., ["id", "subject", "status"])' }

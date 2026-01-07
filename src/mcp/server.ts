@@ -105,7 +105,7 @@ export class MCPServer {
           resources: {}
         },
         serverInfo: {
-          name: 'happyfox-mcp-adapter',
+          name: 'happyfox-mcp',
           version: '2.0.0'
         }
       },
