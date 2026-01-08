@@ -76,8 +76,8 @@ export class ResourceRegistry {
     // Extract cache key from URI (e.g., "happyfox://categories" -> "categories")
     const cacheKey = uri.replace('happyfox://', '');
 
-    // Try to get from cache first
-    let data = await referenceCache.get<any>(auth.accountName, cacheKey);
+    // Try to get from cache first (include region to prevent cross-pollution)
+    let data = await referenceCache.get<any>(auth.accountName, auth.region, cacheKey);
 
     if (!data) {
       // Cache miss - fetch from HappyFox API
@@ -116,8 +116,8 @@ export class ResourceRegistry {
           throw new ResourceNotFoundError(uri);
       }
 
-      // Store in cache for next time
-      await referenceCache.set(auth.accountName, cacheKey, data);
+      // Store in cache for next time (include region)
+      await referenceCache.set(auth.accountName, auth.region, cacheKey, data);
     }
 
     return {

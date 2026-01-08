@@ -16,19 +16,20 @@ export class ReferenceCache {
   }
 
   /**
-   * Generate a cache URL for a given account and resource
+   * Generate a cache URL for a given account, region, and resource
+   * Region is included to prevent cross-pollution between US/EU data
    */
-  private getCacheUrl(accountName: string, resource: string): URL {
-    return new URL(`https://cache.happyfox.local/${accountName}/${resource}`);
+  private getCacheUrl(accountName: string, region: string, resource: string): URL {
+    return new URL(`https://cache.happyfox.local/${region}/${accountName}/${resource}`);
   }
 
   /**
    * Get cached data for a resource
    */
-  async get<T>(accountName: string, resource: string): Promise<T | null> {
+  async get<T>(accountName: string, region: string, resource: string): Promise<T | null> {
     try {
       const cache = await this.getCache();
-      const url = this.getCacheUrl(accountName, resource);
+      const url = this.getCacheUrl(accountName, region, resource);
       const response = await cache.match(url);
 
       if (!response) {
@@ -45,10 +46,10 @@ export class ReferenceCache {
   /**
    * Store data in cache
    */
-  async set<T>(accountName: string, resource: string, data: T): Promise<void> {
+  async set<T>(accountName: string, region: string, resource: string, data: T): Promise<void> {
     try {
       const cache = await this.getCache();
-      const url = this.getCacheUrl(accountName, resource);
+      const url = this.getCacheUrl(accountName, region, resource);
 
       const response = new Response(JSON.stringify(data), {
         headers: {
@@ -60,17 +61,17 @@ export class ReferenceCache {
       await cache.put(url, response);
     } catch {
       // Cache write failure is non-fatal - just log and continue
-      console.warn(`Failed to cache ${resource} for ${accountName}`);
+      console.warn(`Failed to cache ${resource} for ${accountName} (${region})`);
     }
   }
 
   /**
    * Invalidate cached data for a resource
    */
-  async invalidate(accountName: string, resource: string): Promise<void> {
+  async invalidate(accountName: string, region: string, resource: string): Promise<void> {
     try {
       const cache = await this.getCache();
-      const url = this.getCacheUrl(accountName, resource);
+      const url = this.getCacheUrl(accountName, region, resource);
       await cache.delete(url);
     } catch {
       // Invalidation failure is non-fatal
@@ -78,9 +79,9 @@ export class ReferenceCache {
   }
 
   /**
-   * Invalidate all cached data for an account
+   * Invalidate all cached data for an account in a specific region
    */
-  async invalidateAll(accountName: string): Promise<void> {
+  async invalidateAll(accountName: string, region: string): Promise<void> {
     const resources = [
       'categories',
       'statuses',
@@ -92,7 +93,7 @@ export class ReferenceCache {
     ];
 
     await Promise.all(
-      resources.map(resource => this.invalidate(accountName, resource))
+      resources.map(resource => this.invalidate(accountName, region, resource))
     );
   }
 }

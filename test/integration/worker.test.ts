@@ -456,7 +456,7 @@ describe("Worker Fetch Handler - MCP 2025-11-25 Streamable HTTP", () => {
   });
 
   describe("Notifications", () => {
-    it("returns 204 for initialized notification with valid session", async () => {
+    it("returns 202 for initialized notification with valid session", async () => {
       // First, get a session
       const initResponse = await SELF.fetch("https://worker.test/", {
         method: "POST",
@@ -481,7 +481,8 @@ describe("Worker Fetch Handler - MCP 2025-11-25 Streamable HTTP", () => {
         })
       });
 
-      expect(response.status).toBe(204);
+      // MCP 2025-11-25: notifications MUST return 202 Accepted
+      expect(response.status).toBe(202);
     });
   });
 });

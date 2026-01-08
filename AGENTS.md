@@ -35,8 +35,8 @@ MCP Client → Cloudflare Worker → Session Validation → MCP Server → Tool/
 
 - **MCP Server** (`src/mcp/server.ts`): Handles JSON-RPC 2.0 protocol, routes MCP methods to appropriate handlers
 - **Session Token Manager** (`src/session/token.ts`): Stateless HMAC-SHA256 signed session tokens (1-hour TTL)
-- **Tool Registry** (`src/mcp/tools/registry.ts`): Manages 25+ tools across Tickets, Contacts, Categories, and Staff modules
-- **Resource Registry** (`src/mcp/resources/registry.ts`): Provides 8 reference data resources with caching
+- **Tool Registry** (`src/mcp/tools/registry.ts`): Manages 25+ tools across Tickets, Contacts, and Assets modules
+- **Resource Registry** (`src/mcp/resources/registry.ts`): Provides 7 reference data resources with caching
 - **HappyFox Client** (`src/happyfox/client.ts`): HTTP client with exponential backoff for rate limiting (429 responses)
 - **Reference Cache** (`src/cache/reference-cache.ts`): Uses Cloudflare Cache API to cache reference data (15 min TTL)
 - **CORS Middleware** (`src/middleware/cors.ts`): Handles CORS with MCP-specific headers and origin validation
@@ -94,6 +94,8 @@ Basic HTTP authentication with base64 encoded `{apiKey}:{authCode}`
 | DELETE | 202 Accepted (session termination acknowledged) |
 | OPTIONS | 204 Preflight response |
 
+> **Note:** DELETE is advisory only. Since sessions use stateless HMAC-signed tokens, the server cannot actually revoke a token. Tokens remain valid until their natural 1-hour expiration. Clients should discard the token on their end after receiving 202.
+
 ### Required Headers (Post-Initialize)
 
 For all requests after `initialize`, the following headers are **strictly validated**:
@@ -102,14 +104,14 @@ For all requests after `initialize`, the following headers are **strictly valida
 |--------|----------|------------|
 | `MCP-Session-Id` | Yes | Must be valid, unexpired session token |
 | `MCP-Protocol-Version` | Yes | Must exactly match `2025-11-25` |
-| `Accept` | Yes | Must include `application/json` or `*/*` |
+| `Accept` | Yes | Must include both `application/json` and `text/event-stream` (or `*/*`) |
 | `Content-Type` | Yes | Must be `application/json` |
 
-**Validation Order**: Headers are validated in this order: MCP-Protocol-Version → Accept → MCP-Session-Id. The first validation failure returns immediately.
+**Validation Order**: Headers are validated in this order: MCP-Protocol-Version → Accept → Content-Type → MCP-Session-Id. The first validation failure returns immediately.
 
 ### Supported Methods
 - `initialize` - Protocol handshake (returns session token in header)
-- `initialized` / `notifications/initialized` - Notification (requires session, returns HTTP 204)
+- `initialized` / `notifications/initialized` - Notification (requires session, returns HTTP 202)
 - `tools/list`, `tools/call` - Tool discovery and execution (requires session)
 - `resources/list`, `resources/read` - Resource discovery and reading (requires session)
 - `completion/complete` - Autocomplete (stub, requires session)
@@ -120,7 +122,7 @@ For all requests after `initialize`, the following headers are **strictly valida
 
 ### Response Behavior
 - **Requests (with id)**: Return JSON-RPC response with result or error
-- **Notifications (no id)**: Return HTTP 204 No Content
+- **Notifications (no id)**: Return HTTP 202 Accepted (no body)
 - **Tool Errors**: Returns `isError: true` in result with `_meta.statusCode` and `_meta.errorCode`
 - **Protocol Errors**: Returns JSON-RPC error (e.g., -32602 for unknown tool/resource)
 
@@ -238,7 +240,7 @@ curl -X POST "http://localhost:8787" \
   -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25"},"id":1}'
 # Response includes MCP-Session-Id header - save this for subsequent requests
 
-# 2. Send initialized notification (returns HTTP 204, no body)
+# 2. Send initialized notification (returns HTTP 202, no body)
 curl -X POST "http://localhost:8787" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -260,7 +262,7 @@ curl -X POST "http://localhost:8787" \
   -H "X-HappyFox-Account: ACCOUNT" \
   -d '{"jsonrpc":"2.0","method":"tools/list","params":{"cursor":"0"},"id":2}'
 
-# 4. Call a tool (list categories)
+# 4. Call a tool (list tickets)
 curl -X POST "http://localhost:8787" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -269,7 +271,7 @@ curl -X POST "http://localhost:8787" \
   -H "X-HappyFox-ApiKey: KEY" \
   -H "X-HappyFox-AuthCode: CODE" \
   -H "X-HappyFox-Account: ACCOUNT" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"happyfox_list_categories","arguments":{}},"id":3}'
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"happyfox_list_tickets","arguments":{}},"id":3}'
 
 # 5. Call a tool with staff_id (add staff reply)
 curl -X POST "http://localhost:8787" \
@@ -316,8 +318,6 @@ src/
 │   │   ├── registry.ts        # Tool registration and dispatch
 │   │   ├── tickets.ts         # Ticket tools
 │   │   ├── contacts.ts        # Contact tools
-│   │   ├── categories.ts      # Category/metadata tools
-│   │   ├── staff.ts           # Staff tools
 │   │   └── assets.ts          # Asset tools
 │   └── resources/
 │       └── registry.ts        # Resource registration and reading

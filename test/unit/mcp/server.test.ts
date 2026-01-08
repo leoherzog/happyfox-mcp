@@ -3,6 +3,7 @@ import { MCPServer } from "../../../src/mcp/server";
 import { MCPRequest, MCPNotification, HappyFoxAuth, MCP_PROTOCOL_VERSION } from "../../../src/types";
 import { ToolRegistry } from "../../../src/mcp/tools/registry";
 import { ResourceRegistry } from "../../../src/mcp/resources/registry";
+import packageJson from "../../../package.json";
 
 describe("MCPServer", () => {
   const testAuth: HappyFoxAuth = {
@@ -159,7 +160,7 @@ describe("MCPServer", () => {
 
       expect(result?.result?.serverInfo).toEqual({
         name: "happyfox-mcp",
-        version: "2.0.0"
+        version: packageJson.version
       });
     });
   });

@@ -1,6 +1,7 @@
 import { MCPRequest, MCPResponse, MCPError, MCPMessage, HappyFoxAuth, ToolNotFoundError, ToolExecutionError, ResourceNotFoundError, MCP_PROTOCOL_VERSION } from '../types';
 import { ToolRegistry } from './tools/registry';
 import { ResourceRegistry } from './resources/registry';
+import packageJson from '../../package.json';
 
 export class MCPServer {
   private auth: HappyFoxAuth;
@@ -106,7 +107,7 @@ export class MCPServer {
         },
         serverInfo: {
           name: 'happyfox-mcp',
-          version: '2.0.0'
+          version: packageJson.version
         }
       },
       id: request.id
@@ -115,11 +116,21 @@ export class MCPServer {
 
   private async handleToolsList(request: MCPRequest): Promise<MCPResponse> {
     const cursor = request.params?.cursor as string | undefined;
+
+    // Validate cursor if provided
+    let startIndex = 0;
+    if (cursor !== undefined) {
+      const parsed = parseInt(cursor, 10);
+      if (isNaN(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+        throw this.createError(-32602, 'Invalid cursor: must be a non-negative integer');
+      }
+      startIndex = parsed;
+    }
+
     const allTools = await this.toolRegistry.listTools();
 
     // Simple pagination: decode cursor as start index, page size of 50
     const pageSize = 50;
-    const startIndex = cursor ? parseInt(cursor, 10) : 0;
     const endIndex = Math.min(startIndex + pageSize, allTools.length);
     const pagedTools = allTools.slice(startIndex, endIndex);
 
@@ -218,11 +229,21 @@ export class MCPServer {
 
   private async handleResourcesList(request: MCPRequest): Promise<MCPResponse> {
     const cursor = request.params?.cursor as string | undefined;
+
+    // Validate cursor if provided
+    let startIndex = 0;
+    if (cursor !== undefined) {
+      const parsed = parseInt(cursor, 10);
+      if (isNaN(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+        throw this.createError(-32602, 'Invalid cursor: must be a non-negative integer');
+      }
+      startIndex = parsed;
+    }
+
     const allResources = await this.resourceRegistry.listResources();
 
     // Simple pagination: decode cursor as start index, page size of 50
     const pageSize = 50;
-    const startIndex = cursor ? parseInt(cursor, 10) : 0;
     const endIndex = Math.min(startIndex + pageSize, allResources.length);
     const pagedResources = allResources.slice(startIndex, endIndex);
 

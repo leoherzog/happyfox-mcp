@@ -73,7 +73,7 @@ describe("JSON-RPC 2.0 Protocol", () => {
   });
 
   describe("Notifications", () => {
-    it("returns 204 for notification with valid session", async () => {
+    it("returns 202 for notification with valid session", async () => {
       const response = await SELF.fetch("https://worker.test/", {
         method: "POST",
         headers: {
@@ -83,7 +83,8 @@ describe("JSON-RPC 2.0 Protocol", () => {
         body: JSON.stringify(createNotification("initialized"))
       });
 
-      expect(response.status).toBe(204);
+      // MCP 2025-11-25: notifications MUST return 202 Accepted
+      expect(response.status).toBe(202);
     });
 
     it("silently ignores unknown notifications with valid session", async () => {
@@ -96,10 +97,11 @@ describe("JSON-RPC 2.0 Protocol", () => {
         body: JSON.stringify(createNotification("unknown/notification"))
       });
 
-      expect(response.status).toBe(204);
+      // MCP 2025-11-25: notifications MUST return 202 Accepted
+      expect(response.status).toBe(202);
     });
 
-    it("returns 204 for notifications/initialized with valid session", async () => {
+    it("returns 202 for notifications/initialized with valid session", async () => {
       const response = await SELF.fetch("https://worker.test/", {
         method: "POST",
         headers: {
@@ -109,7 +111,8 @@ describe("JSON-RPC 2.0 Protocol", () => {
         body: JSON.stringify(createNotification("notifications/initialized"))
       });
 
-      expect(response.status).toBe(204);
+      // MCP 2025-11-25: notifications MUST return 202 Accepted
+      expect(response.status).toBe(202);
     });
 
     it("rejects notifications without session", async () => {

@@ -118,6 +118,22 @@ export default {
       });
     }
 
+    // 8a. Validate method field exists and is a string (JSON-RPC 2.0 requirement)
+    const body = rawBody as Record<string, unknown>;
+    if (typeof body.method !== 'string' || body.method.length === 0) {
+      return new Response(JSON.stringify({
+        jsonrpc: '2.0',
+        error: {
+          code: -32600,
+          message: 'Invalid Request: Missing or invalid method field'
+        },
+        id: 'id' in body ? body.id : null
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+
     const message = rawBody as MCPMessage;
     const isInitialize = message.method === 'initialize';
 
@@ -154,13 +170,32 @@ export default {
       }
 
       // Validate Accept header includes required content types
-      const acceptHeader = request.headers.get('Accept');
-      if (!acceptHeader || (!acceptHeader.includes('application/json') && !acceptHeader.includes('*/*'))) {
+      // MCP 2025-11-25: Client MUST include Accept header with both application/json and text/event-stream
+      const acceptHeader = request.headers.get('Accept') || '';
+      const hasJson = acceptHeader.includes('application/json') || acceptHeader.includes('*/*');
+      const hasSSE = acceptHeader.includes('text/event-stream') || acceptHeader.includes('*/*');
+      if (!hasJson || !hasSSE) {
         return new Response(JSON.stringify({
           jsonrpc: '2.0',
           error: {
             code: -32600,
-            message: 'Invalid Request: Accept header must include application/json for Streamable HTTP transport.'
+            message: 'Invalid Request: Accept header must include both application/json and text/event-stream for Streamable HTTP transport.'
+          },
+          id: 'id' in message ? message.id : null
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      // Validate Content-Type header
+      const contentType = request.headers.get('Content-Type');
+      if (!contentType || !contentType.includes('application/json')) {
+        return new Response(JSON.stringify({
+          jsonrpc: '2.0',
+          error: {
+            code: -32600,
+            message: 'Invalid Request: Content-Type header must be application/json'
           },
           id: 'id' in message ? message.id : null
         }), {
@@ -214,12 +249,45 @@ export default {
       }
     }
 
-    // 11. Extract authentication from HTTP headers
+    // 11. Extract and validate authentication from HTTP headers
+    const regionHeader = request.headers.get('X-HappyFox-Region');
+    if (regionHeader && regionHeader !== 'us' && regionHeader !== 'eu') {
+      return new Response(JSON.stringify({
+        jsonrpc: '2.0',
+        error: {
+          code: -32602,
+          message: "Invalid params: X-HappyFox-Region must be 'us' or 'eu'"
+        },
+        id: 'id' in message ? message.id : null
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+
+    // SECURITY: Validate account name to prevent SSRF attacks
+    // Account names must be valid subdomains: alphanumeric with hyphens, no consecutive hyphens
+    const accountName = request.headers.get('X-HappyFox-Account') || '';
+    const ACCOUNT_NAME_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i;
+    if (accountName && (!ACCOUNT_NAME_PATTERN.test(accountName) || accountName.includes('--'))) {
+      return new Response(JSON.stringify({
+        jsonrpc: '2.0',
+        error: {
+          code: -32602,
+          message: 'Invalid params: X-HappyFox-Account must be a valid subdomain (alphanumeric and hyphens only, no consecutive hyphens)'
+        },
+        id: 'id' in message ? message.id : null
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+
     const auth: HappyFoxAuth = {
       apiKey: request.headers.get('X-HappyFox-ApiKey') || '',
       authCode: request.headers.get('X-HappyFox-AuthCode') || '',
-      accountName: request.headers.get('X-HappyFox-Account') || '',
-      region: (request.headers.get('X-HappyFox-Region') as 'us' | 'eu') || 'us'
+      accountName: accountName,
+      region: (regionHeader as 'us' | 'eu') || 'us'
     };
 
     // 12. Process the message
@@ -227,9 +295,10 @@ export default {
     const response = await mcpServer.handleMessage(message);
 
     // 13. Handle notifications (no response body)
+    // MCP 2025-11-25: MUST return 202 Accepted for notifications
     if (response === null) {
       return new Response(null, {
-        status: 204,
+        status: 202,
         headers: corsHeaders
       });
     }
