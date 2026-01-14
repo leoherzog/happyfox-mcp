@@ -96,15 +96,19 @@ export function handleWellKnown(request: Request, env: Env): Response | null {
   const url = new URL(request.url);
   const path = url.pathname;
 
-  if (request.method !== 'GET') {
-    return new Response('Method Not Allowed', { status: 405 });
-  }
-
+  // First check if this is a well-known path we handle
+  // Only then enforce GET method requirement
   switch (path) {
     case '/.well-known/oauth-authorization-server':
+      if (request.method !== 'GET') {
+        return new Response('Method Not Allowed', { status: 405 });
+      }
       return handleAuthServerMetadata(request, env);
 
     case '/.well-known/oauth-protected-resource':
+      if (request.method !== 'GET') {
+        return new Response('Method Not Allowed', { status: 405 });
+      }
       return handleProtectedResourceMetadata(request, env);
 
     default:
