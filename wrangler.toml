@@ -21,6 +21,13 @@ enabled = false
 persist = true
 head_sampling_rate = 1
 
+# KV namespace for OAuth credential storage (REQUIRED)
+# Setup: wrangler kv namespace create OAUTH_KV
+# Then replace the placeholder below with your namespace ID
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "bca2a23940a44b1f8e23939b1f71e5c8"
+
 [vars]
 # Resource identifier for OAuth audience validation (update with your deployed URL)
 RESOURCE_IDENTIFIER = "https://happyfox-mcp.your-domain.workers.dev"
