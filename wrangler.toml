@@ -21,14 +21,6 @@ enabled = false
 persist = true
 head_sampling_rate = 1
 
-# KV namespace for OAuth credential storage
-# Create with: wrangler kv:namespace create OAUTH_KV
-# Then update the id below with the returned namespace ID
-[[kv_namespaces]]
-binding = "OAUTH_KV"
-id = "REPLACE_WITH_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_PREVIEW_NAMESPACE_ID"
-
 [vars]
 # Resource identifier for OAuth audience validation (update with your deployed URL)
 RESOURCE_IDENTIFIER = "https://happyfox-mcp.your-domain.workers.dev"
@@ -39,20 +31,16 @@ name = "happyfox-mcp-prod"
 [env.production.vars]
 RESOURCE_IDENTIFIER = "https://happyfox-mcp-prod.your-domain.workers.dev"
 
-[[env.production.kv_namespaces]]
-binding = "OAUTH_KV"
-id = "REPLACE_WITH_PROD_NAMESPACE_ID"
-
 [env.development]
 name = "happyfox-mcp-dev"
 
 [env.development.vars]
 RESOURCE_IDENTIFIER = "https://happyfox-mcp-dev.your-domain.workers.dev"
 
-[[env.development.kv_namespaces]]
-binding = "OAUTH_KV"
-id = "REPLACE_WITH_DEV_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_DEV_PREVIEW_NAMESPACE_ID"
+# KV Namespace Binding (configure via Cloudflare Dashboard):
+# Go to Workers & Pages > your worker > Settings > Bindings > KV Namespace Bindings
+# Add binding with variable name: OAUTH_KV
+# Create the namespace first with: wrangler kv namespace create OAUTH_KV
 
 # Environment variables (set in Cloudflare dashboard or via wrangler secret):
 # ALLOWED_ORIGINS - Comma-separated list of allowed CORS origins (default: localhost)

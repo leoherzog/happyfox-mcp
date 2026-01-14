@@ -249,6 +249,14 @@ Set in `wrangler.toml` or Cloudflare Dashboard:
 **KV Namespace Binding:**
 - `OAUTH_KV` - Cloudflare KV namespace for encrypted credential storage
 
+Configure via Cloudflare Dashboard (recommended) or wrangler.toml:
+
+**Dashboard Setup:**
+1. Create the namespace: `wrangler kv namespace create OAUTH_KV`
+2. Go to **Workers & Pages** > **your worker** > **Settings** > **Bindings**
+3. Click **Add** under **KV Namespace Bindings**
+4. Set variable name to `OAUTH_KV` and select the created namespace
+
 **Required Secrets** (set via `wrangler secret put`):
 - `MCP_SESSION_SECRET` - Secret key for signing MCP session tokens
   - **Minimum length**: 32 characters (validated at startup)
