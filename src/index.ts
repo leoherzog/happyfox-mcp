@@ -26,6 +26,7 @@ interface OAuthProps {
   staffEmail: string;
   accountName: string;
   region: 'us' | 'eu';
+  scopes: string[]; // Include scopes since library only passes props to handler
 }
 
 /**
@@ -52,6 +53,7 @@ interface OAuthRequestInfo {
   state?: string;
   codeChallenge?: string;
   codeChallengeMethod?: string;
+  resource?: string;
 }
 
 interface ClientInfo {
@@ -75,7 +77,6 @@ interface CompleteAuthOptions {
  */
 async function buildAuthContext(
   props: OAuthProps,
-  scopes: string[],
   env: Env
 ): Promise<AuthContext> {
   const credentialStore = createCredentialStore(env.OAUTH_KV, env.CREDENTIAL_ENCRYPTION_KEY);
@@ -94,7 +95,7 @@ async function buildAuthContext(
     },
     staffId: storedCreds.staffId,
     staffEmail: storedCreds.staffEmail,
-    scopes,
+    scopes: props.scopes || [], // Get scopes from props (library only passes props to handler)
     tokenId: props.tokenId,
   };
 }
@@ -212,7 +213,7 @@ class McpApiHandler {
     // Build AuthContext from OAuth props
     let authContext: AuthContext;
     try {
-      authContext = await buildAuthContext(typedCtx.props, typedCtx.scopes, typedEnv);
+      authContext = await buildAuthContext(typedCtx.props, typedEnv);
     } catch (error) {
       return this.jsonRpcError(
         -32002,
@@ -513,10 +514,19 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
         staffEmail: email,
         accountName,
         region,
+        scopes: requestedScopes, // Include scopes in props since library only passes props to handler
       };
 
+      // Remove resource parameter to avoid audience mismatch issues
+      // The @cloudflare/workers-oauth-provider library does strict equality comparison
+      // without trailing slash normalization, causing failures when Claude sends
+      // resource with trailing slash per MCP spec. Since tokens are opaque and
+      // stored in this server's KV, they can only be validated here anyway.
+      const requestWithoutResource = { ...oauthReq };
+      delete requestWithoutResource.resource;
+
       const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
-        request: oauthReq,
+        request: requestWithoutResource,
         userId: tokenId,
         metadata: { staffName: validationResult.staffName, accountName },
         scope: requestedScopes,
@@ -593,8 +603,8 @@ async function handleValidateStaff(request: Request): Promise<Response> {
   }
 }
 
-// Export the OAuth provider as the default handler
-export default new OAuthProvider({
+// Create the OAuth provider
+const oauthProvider = new OAuthProvider({
   apiRoute: '/mcp',
   apiHandler: new McpApiHandler(),
   defaultHandler,
@@ -603,3 +613,41 @@ export default new OAuthProvider({
   scopesSupported: AVAILABLE_SCOPES,
   refreshTokenTTL: 90 * 24 * 60 * 60, // 90 days
 });
+
+/**
+ * Wrapper to intercept token requests and normalize the resource parameter.
+ * This fixes a bug in @cloudflare/workers-oauth-provider where audience comparison
+ * uses strict equality without normalizing trailing slashes.
+ */
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Intercept token endpoint to normalize resource parameter
+    if (url.pathname === '/oauth/token' && request.method === 'POST') {
+      const contentType = request.headers.get('Content-Type') || '';
+      if (contentType.includes('application/x-www-form-urlencoded')) {
+        const body = await request.text();
+        const params = new URLSearchParams(body);
+
+        if (params.has('resource')) {
+          // Normalize: remove trailing slashes
+          const resource = params.get('resource')!;
+          params.set('resource', resource.replace(/\/+$/, ''));
+
+          // Create new request with modified body
+          const newRequest = new Request(request.url, {
+            method: 'POST',
+            headers: request.headers,
+            body: params.toString(),
+          });
+
+          return oauthProvider.fetch(newRequest, env, ctx);
+        }
+      }
+    }
+
+    // All other requests pass through unchanged
+    return oauthProvider.fetch(request, env, ctx);
+  },
+};

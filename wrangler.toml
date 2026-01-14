@@ -28,21 +28,13 @@ head_sampling_rate = 1
 binding = "OAUTH_KV"
 id = "bca2a23940a44b1f8e23939b1f71e5c8"
 
-[vars]
-# Resource identifier for OAuth audience validation (update with your deployed URL)
-RESOURCE_IDENTIFIER = "https://happyfox-mcp.your-domain.workers.dev"
-
+# Environment-specific configurations (optional)
+# RESOURCE_IDENTIFIER is derived automatically from the request URL by the OAuth library
 [env.production]
 name = "happyfox-mcp-prod"
 
-[env.production.vars]
-RESOURCE_IDENTIFIER = "https://happyfox-mcp-prod.your-domain.workers.dev"
-
 [env.development]
 name = "happyfox-mcp-dev"
-
-[env.development.vars]
-RESOURCE_IDENTIFIER = "https://happyfox-mcp-dev.your-domain.workers.dev"
 
 # KV Namespace Binding (configure via Cloudflare Dashboard):
 # Go to Workers & Pages > your worker > Settings > Bindings > KV Namespace Bindings
