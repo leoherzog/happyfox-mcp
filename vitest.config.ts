@@ -10,8 +10,11 @@ export default defineWorkersConfig({
           compatibilityFlags: ["nodejs_compat"],
           bindings: {
             ALLOWED_ORIGINS: "http://localhost:*,https://localhost:*",
-            MCP_SESSION_SECRET: "test-session-secret-key-for-hmac-signing-minimum-32-chars"
-          }
+            MCP_SESSION_SECRET: "test-session-secret-key-for-hmac-signing-minimum-32-chars",
+            // OAuth KV namespace (in-memory for tests)
+            CREDENTIAL_ENCRYPTION_KEY: "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=" // base64 of 32 bytes "12345678901234567890123456789012"
+          },
+          kvNamespaces: ["OAUTH_KV"]
         },
         isolatedStorage: true,
       },

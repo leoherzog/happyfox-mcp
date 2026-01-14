@@ -35,14 +35,11 @@ describe("CORSMiddleware", () => {
       expect(headers["Access-Control-Max-Age"]).toBe("86400");
     });
 
-    it("includes HappyFox auth headers in allowed headers", () => {
+    it("includes OAuth Authorization header in allowed headers", () => {
       const middleware = new CORSMiddleware("*");
       const headers = middleware.getCORSHeaders("https://any.com");
 
-      expect(headers["Access-Control-Allow-Headers"]).toContain("X-HappyFox-ApiKey");
-      expect(headers["Access-Control-Allow-Headers"]).toContain("X-HappyFox-AuthCode");
-      expect(headers["Access-Control-Allow-Headers"]).toContain("X-HappyFox-Account");
-      expect(headers["Access-Control-Allow-Headers"]).toContain("X-HappyFox-Region");
+      expect(headers["Access-Control-Allow-Headers"]).toContain("Authorization");
     });
 
     it("exposes MCP headers to browser", () => {

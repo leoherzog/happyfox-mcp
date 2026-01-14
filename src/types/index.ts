@@ -6,6 +6,9 @@
 export interface Env {
   ALLOWED_ORIGINS?: string;
   MCP_SESSION_SECRET: string;  // Required for session token signing (HMAC-SHA256)
+  OAUTH_KV: KVNamespace;  // KV namespace for OAuth credential storage
+  CREDENTIAL_ENCRYPTION_KEY: string;  // 32-byte base64 key for AES-256-GCM
+  RESOURCE_IDENTIFIER?: string;  // OAuth resource identifier for audience validation
 }
 
 // MCP Protocol version (2025-11-25 Streamable HTTP - no backwards compat)
@@ -32,6 +35,15 @@ export interface HappyFoxAuth {
   authCode: string;
   accountName: string;
   region: 'us' | 'eu';
+}
+
+// OAuth authentication context (passed to MCP server and tools)
+export interface AuthContext {
+  credentials: HappyFoxAuth;  // HappyFox API credentials
+  staffId: number;  // Resolved staff ID for the authenticated user
+  staffEmail: string;  // Email used during OAuth consent
+  scopes: string[];  // Granted OAuth scopes
+  tokenId: string;  // Unique identifier for the OAuth token
 }
 
 // JSON-RPC 2.0 request structure (requests MUST have an id, which can be null per spec)

@@ -26,9 +26,10 @@ npm run test:run
 
 ### Request Flow
 ```
-MCP Client → Cloudflare Worker → Session Validation → MCP Server → Tool/Resource Registry → HappyFox Client → HappyFox API
-                                                                            ↓
-                                                                    Reference Cache (Cache API)
+MCP Client → Cloudflare Worker → OAuth Validation → Session Validation → MCP Server → Tool/Resource Registry → HappyFox Client → HappyFox API
+                                      ↓                                                         ↓
+                              Cloudflare KV                                              Reference Cache
+                             (Encrypted Creds)                                           (Cache API)
 ```
 
 ### Core Components
@@ -43,11 +44,32 @@ MCP Client → Cloudflare Worker → Session Validation → MCP Server → Tool/
 
 ### Authentication
 
-**HappyFox Credentials (via Headers):**
-- `X-HappyFox-ApiKey` - HappyFox API key
-- `X-HappyFox-AuthCode` - HappyFox auth code
-- `X-HappyFox-Account` - HappyFox account subdomain
-- `X-HappyFox-Region` - (Optional) "us" or "eu" (default: "us")
+**OAuth 2.0 (RFC 6749):**
+
+The server uses OAuth 2.0 with PKCE for authentication. HappyFox credentials are collected during the OAuth consent flow and stored encrypted in Cloudflare KV.
+
+**OAuth Flow:**
+1. Client redirects to `/authorize` with PKCE challenge
+2. User enters HappyFox credentials (subdomain, API key, auth code, staff email)
+3. Server validates credentials and resolves `staff_id` from email
+4. Credentials are encrypted (AES-256-GCM) and stored in KV
+5. Authorization code returned to client
+6. Client exchanges code for access/refresh tokens at `/oauth/token`
+7. Client uses Bearer token for MCP requests to `/mcp`
+
+**Available Scopes:**
+| Scope | Permissions |
+|-------|-------------|
+| `happyfox:read` | Read tickets, contacts, assets, and resources |
+| `happyfox:write` | Create/update tickets, add replies, manage contacts |
+| `happyfox:admin` | Delete tickets, move categories, delete assets |
+
+**Staff ID Auto-Resolution:**
+During OAuth consent, the server resolves the user's `staff_id` by matching their email against the HappyFox staff list. Tools requiring `staff_id` (like `happyfox_add_staff_reply`) will auto-inject this value if not provided.
+
+**Well-Known Endpoints:**
+- `/.well-known/oauth-authorization-server` - OAuth server metadata (RFC 8414)
+- `/.well-known/oauth-protected-resource` - Protected resource metadata (RFC 9728)
 
 **MCP Session (MCP 2025-11-25):**
 - Sessions are initiated via `initialize` request
@@ -199,10 +221,14 @@ The following tools require a `staff_id` parameter (HappyFox API requirement):
 - `happyfox_forward_ticket` - Staff ID forwarding the ticket
 - `happyfox_delete_ticket` - Staff ID performing the deletion
 - `happyfox_move_ticket_category` - Staff ID performing the move
+- `happyfox_update_ticket_tags` - Staff ID performing the update
+- `happyfox_subscribe_to_ticket` - Staff ID to subscribe
+- `happyfox_unsubscribe_from_ticket` - Staff ID to unsubscribe
+- `happyfox_create_asset` - Staff ID (as `created_by`)
+- `happyfox_update_asset` - Staff ID (as `updated_by`)
+- `happyfox_delete_asset` - Staff ID (as `deleted_by`)
 
-**Important**: HappyFox API keys are account-wide credentials, not tied to specific staff members. There is no `/me` or `/current_user` endpoint to identify the authenticated user. Clients must determine their `staff_id` by:
-1. Calling `happyfox_list_staff` and filtering by their known email address, or
-2. Configuring the `staff_id` manually in their MCP client setup
+**Auto-Injection**: With OAuth authentication, the `staff_id` is automatically resolved during the consent flow (by matching the user's email to the HappyFox staff list). If not provided in tool arguments, the OAuth user's `staff_id` is automatically injected. Users can still explicitly provide a different `staff_id` to act on behalf of another staff member.
 
 ### Attachment Support
 File attachments are **not supported**. The HappyFox API requires multipart/form-data for attachments, which is not implemented. Attachment parameters have been removed from tool schemas.
@@ -218,85 +244,86 @@ The project uses Cloudflare Workers' built-in TypeScript support - no build step
 
 Set in `wrangler.toml` or Cloudflare Dashboard:
 - `ALLOWED_ORIGINS` - (Optional) Comma-separated list of allowed CORS origins
+- `RESOURCE_IDENTIFIER` - (Optional) OAuth resource identifier URL (defaults to worker URL)
 
-**Required Secret** (set via `wrangler secret put`):
-- `MCP_SESSION_SECRET` - Secret key for signing session tokens
+**KV Namespace Binding:**
+- `OAUTH_KV` - Cloudflare KV namespace for encrypted credential storage
+
+**Required Secrets** (set via `wrangler secret put`):
+- `MCP_SESSION_SECRET` - Secret key for signing MCP session tokens
   - **Minimum length**: 32 characters (validated at startup)
   - **Failure mode**: Returns HTTP 500 with error -32603 if missing or too short
   - **Generation**: Use `openssl rand -base64 32` or similar to generate a secure secret
+- `CREDENTIAL_ENCRYPTION_KEY` - AES-256-GCM key for encrypting stored credentials
+  - **Format**: 32 bytes, base64 encoded
+  - **Generation**: Use `openssl rand -base64 32` to generate
 
 ## Testing MCP Endpoints (MCP 2025-11-25)
 
-The request flow follows a session-based pattern:
+The request flow follows an OAuth + session-based pattern. First obtain a Bearer token via OAuth, then use it for MCP requests:
 
 ```bash
+# 0. Obtain OAuth token (via browser OAuth flow or token exchange)
+# The Bearer token is obtained by completing the OAuth consent flow at /authorize
+# For testing, you'll need a valid access token from the OAuth flow
+
 # 1. Initialize (get session ID)
-curl -X POST "http://localhost:8787" \
+curl -X POST "http://localhost:8787/mcp" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -H "X-HappyFox-ApiKey: KEY" \
-  -H "X-HappyFox-AuthCode: CODE" \
-  -H "X-HappyFox-Account: ACCOUNT" \
+  -H "Authorization: Bearer <access-token>" \
   -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25"},"id":1}'
 # Response includes MCP-Session-Id header - save this for subsequent requests
 
 # 2. Send initialized notification (returns HTTP 202, no body)
-curl -X POST "http://localhost:8787" \
+curl -X POST "http://localhost:8787/mcp" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer <access-token>" \
   -H "MCP-Session-Id: <session-id-from-step-1>" \
   -H "MCP-Protocol-Version: 2025-11-25" \
-  -H "X-HappyFox-ApiKey: KEY" \
-  -H "X-HappyFox-AuthCode: CODE" \
-  -H "X-HappyFox-Account: ACCOUNT" \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
-# 3. List tools (with pagination)
-curl -X POST "http://localhost:8787" \
+# 3. List tools (filtered by OAuth scopes, with pagination)
+curl -X POST "http://localhost:8787/mcp" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer <access-token>" \
   -H "MCP-Session-Id: <session-id>" \
   -H "MCP-Protocol-Version: 2025-11-25" \
-  -H "X-HappyFox-ApiKey: KEY" \
-  -H "X-HappyFox-AuthCode: CODE" \
-  -H "X-HappyFox-Account: ACCOUNT" \
   -d '{"jsonrpc":"2.0","method":"tools/list","params":{"cursor":"0"},"id":2}'
 
-# 4. Call a tool (list tickets)
-curl -X POST "http://localhost:8787" \
+# 4. Call a tool (list tickets - requires happyfox:read scope)
+curl -X POST "http://localhost:8787/mcp" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer <access-token>" \
   -H "MCP-Session-Id: <session-id>" \
   -H "MCP-Protocol-Version: 2025-11-25" \
-  -H "X-HappyFox-ApiKey: KEY" \
-  -H "X-HappyFox-AuthCode: CODE" \
-  -H "X-HappyFox-Account: ACCOUNT" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"happyfox_list_tickets","arguments":{}},"id":3}'
 
-# 5. Call a tool with staff_id (add staff reply)
-curl -X POST "http://localhost:8787" \
+# 5. Call a tool (add staff reply - requires happyfox:write scope)
+# Note: staff_id is auto-injected from OAuth context if not provided
+curl -X POST "http://localhost:8787/mcp" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer <access-token>" \
   -H "MCP-Session-Id: <session-id>" \
   -H "MCP-Protocol-Version: 2025-11-25" \
-  -H "X-HappyFox-ApiKey: KEY" \
-  -H "X-HappyFox-AuthCode: CODE" \
-  -H "X-HappyFox-Account: ACCOUNT" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"happyfox_add_staff_reply","arguments":{"ticket_id":"123","staff_id":"1","text":"Reply message"}},"id":4}'
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"happyfox_add_staff_reply","arguments":{"ticket_id":"123","text":"Reply message"}},"id":4}'
 
-# 6. Read a resource
-curl -X POST "http://localhost:8787" \
+# 6. Read a resource (requires happyfox:read scope)
+curl -X POST "http://localhost:8787/mcp" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer <access-token>" \
   -H "MCP-Session-Id: <session-id>" \
   -H "MCP-Protocol-Version: 2025-11-25" \
-  -H "X-HappyFox-ApiKey: KEY" \
-  -H "X-HappyFox-AuthCode: CODE" \
-  -H "X-HappyFox-Account: ACCOUNT" \
   -d '{"jsonrpc":"2.0","method":"resources/read","params":{"uri":"happyfox://categories"},"id":5}'
 
 # 7. Terminate session (optional)
-curl -X DELETE "http://localhost:8787" \
+curl -X DELETE "http://localhost:8787/mcp" \
+  -H "Authorization: Bearer <access-token>" \
   -H "MCP-Session-Id: <session-id>"
 # Returns HTTP 202 Accepted
 ```
@@ -305,9 +332,20 @@ curl -X DELETE "http://localhost:8787" \
 
 ```
 src/
-├── index.ts                    # Cloudflare Worker entry point & transport layer
+├── index.ts                    # Cloudflare Worker entry point with OAuth provider
 ├── types/
-│   └── index.ts               # TypeScript type definitions (incl. session types)
+│   └── index.ts               # TypeScript type definitions (incl. AuthContext)
+├── oauth/
+│   ├── types.ts               # OAuth type definitions (scopes, credentials)
+│   ├── handlers/
+│   │   └── metadata.ts        # Well-known OAuth metadata endpoints
+│   ├── services/
+│   │   ├── credential-store.ts    # AES-256-GCM encrypted credential storage
+│   │   ├── happyfox-validator.ts  # Credential validation & staff ID resolution
+│   │   ├── client-metadata.ts     # CIMD fetching and validation
+│   │   └── scope-enforcer.ts      # Tool-to-scope mapping and enforcement
+│   └── views/
+│       └── consent.ts         # OAuth consent page HTML (Pico CSS)
 ├── session/
 │   └── token.ts               # Stateless HMAC-SHA256 session token manager
 ├── cache/
@@ -315,7 +353,7 @@ src/
 ├── mcp/
 │   ├── server.ts              # MCP protocol handler
 │   ├── tools/
-│   │   ├── registry.ts        # Tool registration and dispatch
+│   │   ├── registry.ts        # Tool registration with scope enforcement
 │   │   ├── tickets.ts         # Ticket tools
 │   │   ├── contacts.ts        # Contact tools
 │   │   └── assets.ts          # Asset tools
@@ -339,11 +377,11 @@ test/
 │   └── types/
 │       └── errors.test.ts     # Error handling tests
 ├── integration/
-│   ├── worker.test.ts         # Transport layer tests (MCP 2025-11-25)
-│   ├── json-rpc.test.ts       # JSON-RPC protocol tests
-│   ├── mcp-protocol.test.ts   # MCP protocol compliance tests
-│   ├── tools/                 # Tool integration tests
-│   └── resources/             # Resource integration tests
+│   ├── worker.test.ts         # OAuth endpoint tests
+│   ├── json-rpc.test.ts       # JSON-RPC protocol tests (requires OAuth)
+│   ├── mcp-protocol.test.ts   # MCP protocol compliance tests (requires OAuth)
+│   ├── tools/                 # Tool integration tests (requires OAuth)
+│   └── resources/             # Resource integration tests (requires OAuth)
 ├── fixtures/
 │   └── auth.ts                # Test authentication helpers
 └── helpers/

@@ -41,7 +41,7 @@ export class AssetTools {
             asset_type_id: { type: 'number', description: 'Asset type ID (required)' },
             name: { type: 'string', description: 'Asset name (required)' },
             display_id: { type: 'string', description: 'Custom display ID for the asset' },
-            created_by: { type: 'number', description: 'Staff ID who created the asset' },
+            created_by: { type: 'number', description: 'Staff ID who created the asset. Optional - defaults to authenticated user.' },
             contact_ids: {
               type: 'array',
               items: { type: 'number' },
@@ -76,7 +76,7 @@ export class AssetTools {
               description: 'Custom field values (a-cf-{id}: value)'
             }
           },
-          required: ['asset_type_id', 'name', 'created_by']
+          required: ['asset_type_id', 'name']
         }
       },
       {
@@ -87,9 +87,9 @@ export class AssetTools {
           type: 'object',
           properties: {
             asset_id: { type: 'number', description: 'Asset ID to update (required)' },
-            name: { type: 'string', description: 'Asset name (required)' },
-            display_id: { type: 'string', description: 'Custom display ID (required)' },
-            updated_by: { type: 'number', description: 'Staff ID who updated the asset (required)' },
+            name: { type: 'string', description: 'Asset name' },
+            display_id: { type: 'string', description: 'Custom display ID' },
+            updated_by: { type: 'number', description: 'Staff ID who updated the asset. Optional - defaults to authenticated user.' },
             contact_ids: {
               type: 'array',
               items: { type: 'number' },
@@ -110,20 +110,20 @@ export class AssetTools {
             },
             custom_fields: { type: 'object', description: 'Custom field values (a-cf-{id}: value)' }
           },
-          required: ['asset_id', 'name', 'display_id', 'updated_by']
+          required: ['asset_id']
         }
       },
       {
         name: 'happyfox_delete_asset',
-        description: 'Delete an asset (requires staff ID who is deleting)',
+        description: 'Delete an asset',
         handler: 'deleteAsset',
         inputSchema: {
           type: 'object',
           properties: {
             asset_id: { type: 'number', description: 'Asset ID to delete' },
-            deleted_by: { type: 'number', description: 'Staff ID performing the deletion (required)' }
+            deleted_by: { type: 'number', description: 'Staff ID performing the deletion. Optional - defaults to authenticated user.' }
           },
-          required: ['asset_id', 'deleted_by']
+          required: ['asset_id']
         }
       },
       {

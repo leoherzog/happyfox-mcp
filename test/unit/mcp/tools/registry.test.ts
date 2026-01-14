@@ -1,10 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ToolRegistry } from "../../../../src/mcp/tools/registry";
-import { ToolNotFoundError, ToolExecutionError, HappyFoxAuth } from "../../../../src/types";
+import { ToolNotFoundError, ToolExecutionError, HappyFoxAuth, AuthContext } from "../../../../src/types";
 import { HappyFoxAPIError } from "../../../../src/happyfox/client";
+
+// Mock global fetch to prevent network calls in unit tests
+const mockFetch = vi.fn();
 
 describe("ToolRegistry", () => {
   let registry: ToolRegistry;
+  let originalFetch: typeof global.fetch;
+
   const testAuth: HappyFoxAuth = {
     apiKey: "test-api-key",
     authCode: "test-auth-code",
@@ -12,8 +17,32 @@ describe("ToolRegistry", () => {
     region: "us"
   };
 
+  const testAuthContext: AuthContext = {
+    credentials: testAuth,
+    staffId: 1,
+    staffEmail: "test@example.com",
+    scopes: ["happyfox:read", "happyfox:write", "happyfox:admin"],
+    tokenId: "test-token-id"
+  };
+
   beforeEach(() => {
     registry = new ToolRegistry();
+    // Replace global fetch with mock to prevent network calls
+    originalFetch = global.fetch;
+    global.fetch = mockFetch;
+    // Default mock response for API calls
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: "Unauthorized" }),
+      text: async () => "Unauthorized"
+    });
+  });
+
+  afterEach(() => {
+    // Restore original fetch
+    global.fetch = originalFetch;
+    mockFetch.mockReset();
   });
 
   describe("constructor", () => {
@@ -83,29 +112,24 @@ describe("ToolRegistry", () => {
     });
   });
 
-  describe("callTool", () => {
+  describe("callToolWithAuth", () => {
     it("throws ToolNotFoundError for unknown tool", async () => {
-      await expect(registry.callTool("nonexistent_tool", {}, testAuth))
+      await expect(registry.callToolWithAuth("nonexistent_tool", {}, testAuthContext))
         .rejects.toThrow(ToolNotFoundError);
     });
 
     it("throws ToolNotFoundError with correct message", async () => {
-      await expect(registry.callTool("unknown_tool", {}, testAuth))
+      await expect(registry.callToolWithAuth("unknown_tool", {}, testAuthContext))
         .rejects.toThrow("Tool not found: unknown_tool");
     });
 
     it("wraps HappyFoxAPIError in ToolExecutionError", async () => {
-      // We can't easily mock the internal handler, but we can test the error handling logic
-      // by checking that ToolExecutionError is thrown for API errors
-      // This would require the actual API call to fail
+      // With mocked fetch returning 401, the handler will throw ToolExecutionError
+      await expect(registry.callToolWithAuth("happyfox_get_ticket", { ticket_id: "invalid" }, testAuthContext))
+        .rejects.toThrow(ToolExecutionError);
 
-      // For now, let's verify the error type for an invalid call
-      try {
-        await registry.callTool("happyfox_get_ticket", { ticket_id: "invalid" }, testAuth);
-      } catch (error) {
-        // The error should be a ToolExecutionError (from API failure) or similar
-        expect(error).toBeInstanceOf(Error);
-      }
+      // Verify fetch was called (not bypassed)
+      expect(mockFetch).toHaveBeenCalled();
     });
 
     it("wraps non-Error thrown values in ToolExecutionError", async () => {
@@ -117,11 +141,11 @@ describe("ToolRegistry", () => {
         throw "string error from handler";
       });
 
-      await expect(testRegistry.callTool("happyfox_list_tickets", {}, testAuth))
+      await expect(testRegistry.callToolWithAuth("happyfox_list_tickets", {}, testAuthContext))
         .rejects.toThrow(ToolExecutionError);
 
       try {
-        await testRegistry.callTool("happyfox_list_tickets", {}, testAuth);
+        await testRegistry.callToolWithAuth("happyfox_list_tickets", {}, testAuthContext);
       } catch (error) {
         expect(error).toBeInstanceOf(ToolExecutionError);
         expect((error as ToolExecutionError).message).toBe("string error from handler");
@@ -135,14 +159,31 @@ describe("ToolRegistry", () => {
         throw new Error("regular error from handler");
       });
 
-      await expect(testRegistry.callTool("happyfox_list_tickets", {}, testAuth))
+      await expect(testRegistry.callToolWithAuth("happyfox_list_tickets", {}, testAuthContext))
         .rejects.toThrow(ToolExecutionError);
 
       try {
-        await testRegistry.callTool("happyfox_list_tickets", {}, testAuth);
+        await testRegistry.callToolWithAuth("happyfox_list_tickets", {}, testAuthContext);
       } catch (error) {
         expect(error).toBeInstanceOf(ToolExecutionError);
         expect((error as ToolExecutionError).message).toBe("regular error from handler");
+      }
+    });
+
+    it("throws ToolExecutionError for insufficient scopes", async () => {
+      const limitedAuthContext: AuthContext = {
+        ...testAuthContext,
+        scopes: ["happyfox:read"] // Only read scope, not admin
+      };
+
+      await expect(registry.callToolWithAuth("happyfox_delete_ticket", { ticket_id: "123" }, limitedAuthContext))
+        .rejects.toThrow(ToolExecutionError);
+
+      try {
+        await registry.callToolWithAuth("happyfox_delete_ticket", { ticket_id: "123" }, limitedAuthContext);
+      } catch (error) {
+        expect(error).toBeInstanceOf(ToolExecutionError);
+        expect((error as ToolExecutionError).message).toContain("Insufficient permissions");
       }
     });
   });
@@ -158,19 +199,23 @@ describe("ToolRegistry", () => {
 
     it("binds handlers correctly", async () => {
       // Verify that handlers are bound by checking they exist for all tools
+      // Uses mocked fetch to prevent network calls
       const tools = await registry.listTools();
 
       for (const tool of tools) {
-        // This would throw if handler wasn't registered
-        // We can't easily test without mocking, but verify it doesn't throw ToolNotFoundError
-        // for valid tool names (though it may throw ToolExecutionError due to network)
+        // This would throw ToolNotFoundError if handler wasn't registered
+        // With mocked fetch, it will throw ToolExecutionError from the mock 401 response
         try {
-          await registry.callTool(tool.name, {}, testAuth);
+          await registry.callToolWithAuth(tool.name, {}, testAuthContext);
         } catch (error) {
           // Should NOT be ToolNotFoundError - that would mean handler wasn't registered
           expect(error).not.toBeInstanceOf(ToolNotFoundError);
+          // Should be ToolExecutionError from the mocked API response
+          expect(error).toBeInstanceOf(ToolExecutionError);
         }
       }
+      // Verify fetch was actually called (handlers executed, not just registered)
+      expect(mockFetch).toHaveBeenCalled();
     });
   });
 });

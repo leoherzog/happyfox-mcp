@@ -1,6 +1,7 @@
 name = "happyfox-mcp"
 main = "src/index.ts"
 compatibility_date = "2025-11-17"
+compatibility_flags = ["global_fetch_strictly_public"]
 
 [placement]
 mode = "smart"
@@ -20,24 +21,52 @@ enabled = false
 persist = true
 head_sampling_rate = 1
 
+# KV namespace for OAuth credential storage
+# Create with: wrangler kv:namespace create OAUTH_KV
+# Then update the id below with the returned namespace ID
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "REPLACE_WITH_NAMESPACE_ID"
+preview_id = "REPLACE_WITH_PREVIEW_NAMESPACE_ID"
+
+[vars]
+# Resource identifier for OAuth audience validation (update with your deployed URL)
+RESOURCE_IDENTIFIER = "https://happyfox-mcp.your-domain.workers.dev"
+
 [env.production]
 name = "happyfox-mcp-prod"
+
+[env.production.vars]
+RESOURCE_IDENTIFIER = "https://happyfox-mcp-prod.your-domain.workers.dev"
+
+[[env.production.kv_namespaces]]
+binding = "OAUTH_KV"
+id = "REPLACE_WITH_PROD_NAMESPACE_ID"
 
 [env.development]
 name = "happyfox-mcp-dev"
 
+[env.development.vars]
+RESOURCE_IDENTIFIER = "https://happyfox-mcp-dev.your-domain.workers.dev"
+
+[[env.development.kv_namespaces]]
+binding = "OAUTH_KV"
+id = "REPLACE_WITH_DEV_NAMESPACE_ID"
+preview_id = "REPLACE_WITH_DEV_PREVIEW_NAMESPACE_ID"
+
 # Environment variables (set in Cloudflare dashboard or via wrangler secret):
 # ALLOWED_ORIGINS - Comma-separated list of allowed CORS origins (default: localhost)
 
-# Required secret (set via: wrangler secret put MCP_SESSION_SECRET):
+# Required secrets (set via: wrangler secret put <NAME>):
 # MCP_SESSION_SECRET - Secret key for session token signing (32+ characters recommended)
 #                      Required for MCP 2025-11-25 Streamable HTTP session management
+# CREDENTIAL_ENCRYPTION_KEY - 32-byte base64 key for AES-256-GCM credential encryption
+#                             Generate with: openssl rand -base64 32
 
-# Authentication is provided via HTTP headers:
-# X-HappyFox-ApiKey - HappyFox API key
-# X-HappyFox-AuthCode - HappyFox auth code
-# X-HappyFox-Account - HappyFox account subdomain
-# X-HappyFox-Region - "us" or "eu" (default: "us")
+# OAuth 2.0 Authentication
+# Authentication is now handled via OAuth 2.0 with Bearer tokens.
+# HappyFox credentials are collected during the OAuth consent flow and stored
+# encrypted in Cloudflare KV. Legacy X-HappyFox-* headers are no longer supported.
 
 # TypeScript is automatically compiled by Wrangler
 # No build configuration needed

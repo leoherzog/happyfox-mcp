@@ -96,10 +96,10 @@ export class TicketTools {
           type: 'object',
           properties: {
             ticket_id: { type: 'string', description: 'Ticket ID' },
-            staff_id: { type: 'number', description: 'Staff ID performing the move' },
+            staff_id: { type: 'number', description: 'Staff ID performing the move. Optional - defaults to authenticated user.' },
             target_category_id: { type: 'string', description: 'Target category ID' }
           },
-          required: ['ticket_id', 'staff_id', 'target_category_id']
+          required: ['ticket_id', 'target_category_id']
         }
       },
       {
@@ -110,7 +110,7 @@ export class TicketTools {
           type: 'object',
           properties: {
             ticket_id: { type: 'string', description: 'Ticket ID' },
-            staff_id: { type: 'number', description: 'Staff/Agent ID making the reply (required)' },
+            staff_id: { type: 'number', description: 'Staff/Agent ID making the reply. Optional - defaults to authenticated user.' },
             text: { type: 'string', description: 'Reply text (HTML supported)' },
             cc: { type: 'array', items: { type: 'string' }, description: 'CC email addresses' },
             bcc: { type: 'array', items: { type: 'string' }, description: 'BCC email addresses' },
@@ -118,7 +118,7 @@ export class TicketTools {
             priority: { type: 'string', description: 'Update ticket priority ID' },
             assignee: { type: 'number', description: 'Reassign ticket to this Staff/Agent ID' }
           },
-          required: ['ticket_id', 'staff_id', 'text']
+          required: ['ticket_id', 'text']
         }
       },
       {
@@ -129,12 +129,12 @@ export class TicketTools {
           type: 'object',
           properties: {
             ticket_id: { type: 'string', description: 'Ticket ID' },
-            staff_id: { type: 'number', description: 'Staff/Agent ID making the note (required)' },
+            staff_id: { type: 'number', description: 'Staff/Agent ID making the note. Optional - defaults to authenticated user.' },
             text: { type: 'string', description: 'Note text (HTML supported)' },
             status: { type: 'string', description: 'Update ticket status ID' },
             priority: { type: 'string', description: 'Update ticket priority ID' }
           },
-          required: ['ticket_id', 'staff_id', 'text']
+          required: ['ticket_id', 'text']
         }
       },
       {
@@ -145,12 +145,12 @@ export class TicketTools {
           type: 'object',
           properties: {
             ticket_id: { type: 'string', description: 'Ticket ID' },
-            staff_id: { type: 'number', description: 'Staff/Agent ID forwarding the ticket (required)' },
+            staff_id: { type: 'number', description: 'Staff/Agent ID forwarding the ticket. Optional - defaults to authenticated user.' },
             to: { type: 'array', items: { type: 'string' }, description: 'Forward to email addresses' },
             subject: { type: 'string', description: 'Email subject (required)' },
             message: { type: 'string', description: 'Email body (HTML supported)' }
           },
-          required: ['ticket_id', 'staff_id', 'to', 'subject']
+          required: ['ticket_id', 'to', 'subject']
         }
       },
       {
@@ -161,9 +161,9 @@ export class TicketTools {
           type: 'object',
           properties: {
             ticket_id: { type: 'string', description: 'Ticket ID' },
-            staff_id: { type: 'number', description: 'Staff/Agent ID performing the deletion (required)' }
+            staff_id: { type: 'number', description: 'Staff/Agent ID performing the deletion. Optional - defaults to authenticated user.' }
           },
-          required: ['ticket_id', 'staff_id']
+          required: ['ticket_id']
         }
       },
       {
@@ -190,9 +190,9 @@ export class TicketTools {
           type: 'object',
           properties: {
             ticket_id: { type: 'string', description: 'Ticket ID' },
-            staff_id: { type: 'number', description: 'Staff/Agent ID to subscribe' }
+            staff_id: { type: 'number', description: 'Staff/Agent ID to subscribe. Optional - defaults to authenticated user.' }
           },
-          required: ['ticket_id', 'staff_id']
+          required: ['ticket_id']
         }
       },
       {
@@ -203,9 +203,9 @@ export class TicketTools {
           type: 'object',
           properties: {
             ticket_id: { type: 'string', description: 'Ticket ID' },
-            staff_id: { type: 'number', description: 'Staff/Agent ID to unsubscribe' }
+            staff_id: { type: 'number', description: 'Staff/Agent ID to unsubscribe. Optional - defaults to authenticated user.' }
           },
-          required: ['ticket_id', 'staff_id']
+          required: ['ticket_id']
         }
       },
       {

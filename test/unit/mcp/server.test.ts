@@ -1,31 +1,29 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MCPServer } from "../../../src/mcp/server";
-import { MCPRequest, MCPNotification, HappyFoxAuth, MCP_PROTOCOL_VERSION } from "../../../src/types";
+import { MCPRequest, MCPNotification, AuthContext, MCP_PROTOCOL_VERSION } from "../../../src/types";
 import { ToolRegistry } from "../../../src/mcp/tools/registry";
 import { ResourceRegistry } from "../../../src/mcp/resources/registry";
 import packageJson from "../../../package.json";
 
 describe("MCPServer", () => {
-  const testAuth: HappyFoxAuth = {
-    apiKey: "test-api-key",
-    authCode: "test-auth-code",
-    accountName: "testaccount",
-    region: "us"
-  };
-
-  const emptyAuth: HappyFoxAuth = {
-    apiKey: "",
-    authCode: "",
-    accountName: "",
-    region: "us"
+  // Create test AuthContext (authentication is now handled by OAuth layer)
+  const testAuthContext: AuthContext = {
+    credentials: {
+      apiKey: "test-api-key",
+      authCode: "test-auth-code",
+      accountName: "testaccount",
+      region: "us"
+    },
+    staffId: 1,
+    staffEmail: "test@example.com",
+    scopes: ["happyfox:read", "happyfox:write"],
+    tokenId: "test-token-id"
   };
 
   let server: MCPServer;
-  let serverNoAuth: MCPServer;
 
   beforeEach(() => {
-    server = new MCPServer(testAuth);
-    serverNoAuth = new MCPServer(emptyAuth);
+    server = new MCPServer(testAuthContext);
   });
 
   describe("handleMessage - notifications", () => {
@@ -212,82 +210,8 @@ describe("MCPServer", () => {
   });
 
   describe("handleToolCall", () => {
-    it("requires authentication headers", async () => {
-      const request: MCPRequest = {
-        jsonrpc: "2.0",
-        method: "tools/call",
-        params: {
-          name: "happyfox_list_tickets",
-          arguments: {}
-        },
-        id: 1
-      };
-
-      const result = await serverNoAuth.handleMessage(request);
-
-      expect(result?.error?.code).toBe(-32002);
-      expect(result?.error?.message).toContain("Authentication required");
-    });
-
-    it("requires apiKey for authentication", async () => {
-      const partialAuth: HappyFoxAuth = {
-        apiKey: "",
-        authCode: "auth-code",
-        accountName: "account",
-        region: "us"
-      };
-      const partialServer = new MCPServer(partialAuth);
-
-      const request: MCPRequest = {
-        jsonrpc: "2.0",
-        method: "tools/call",
-        params: { name: "happyfox_list_tickets", arguments: {} },
-        id: 1
-      };
-
-      const result = await partialServer.handleMessage(request);
-      expect(result?.error?.code).toBe(-32002);
-    });
-
-    it("requires authCode for authentication", async () => {
-      const partialAuth: HappyFoxAuth = {
-        apiKey: "api-key",
-        authCode: "",
-        accountName: "account",
-        region: "us"
-      };
-      const partialServer = new MCPServer(partialAuth);
-
-      const request: MCPRequest = {
-        jsonrpc: "2.0",
-        method: "tools/call",
-        params: { name: "happyfox_list_tickets", arguments: {} },
-        id: 1
-      };
-
-      const result = await partialServer.handleMessage(request);
-      expect(result?.error?.code).toBe(-32002);
-    });
-
-    it("requires accountName for authentication", async () => {
-      const partialAuth: HappyFoxAuth = {
-        apiKey: "api-key",
-        authCode: "auth-code",
-        accountName: "",
-        region: "us"
-      };
-      const partialServer = new MCPServer(partialAuth);
-
-      const request: MCPRequest = {
-        jsonrpc: "2.0",
-        method: "tools/call",
-        params: { name: "happyfox_list_tickets", arguments: {} },
-        id: 1
-      };
-
-      const result = await partialServer.handleMessage(request);
-      expect(result?.error?.code).toBe(-32002);
-    });
+    // Note: Authentication is now handled by OAuth layer in index.ts
+    // MCPServer expects an already-authenticated AuthContext
 
     it("requires tool name parameter", async () => {
       const request: MCPRequest = {
@@ -323,10 +247,10 @@ describe("MCPServer", () => {
     });
 
     it("handles unknown errors during tool execution", async () => {
-      const errorServer = new MCPServer(testAuth);
+      const errorServer = new MCPServer(testAuthContext);
 
-      // Mock toolRegistry.callTool to throw a plain Error (not ToolExecutionError)
-      vi.spyOn((errorServer as any).toolRegistry, 'callTool').mockRejectedValue(
+      // Mock toolRegistry.callToolWithAuth to throw a plain Error (not ToolExecutionError)
+      vi.spyOn((errorServer as any).toolRegistry, 'callToolWithAuth').mockRejectedValue(
         new Error("Unexpected error")
       );
 
@@ -348,10 +272,10 @@ describe("MCPServer", () => {
     });
 
     it("handles non-Error objects thrown during tool execution", async () => {
-      const errorServer = new MCPServer(testAuth);
+      const errorServer = new MCPServer(testAuthContext);
 
-      // Mock toolRegistry.callTool to throw a non-Error value
-      vi.spyOn((errorServer as any).toolRegistry, 'callTool').mockRejectedValue(
+      // Mock toolRegistry.callToolWithAuth to throw a non-Error value
+      vi.spyOn((errorServer as any).toolRegistry, 'callToolWithAuth').mockRejectedValue(
         "string error from tool"
       );
 
@@ -401,21 +325,8 @@ describe("MCPServer", () => {
   });
 
   describe("handleResourceRead", () => {
-    it("requires authentication", async () => {
-      const request: MCPRequest = {
-        jsonrpc: "2.0",
-        method: "resources/read",
-        params: {
-          uri: "happyfox://categories"
-        },
-        id: 1
-      };
-
-      const result = await serverNoAuth.handleMessage(request);
-
-      expect(result?.error?.code).toBe(-32002);
-      expect(result?.error?.message).toContain("Authentication required");
-    });
+    // Note: Authentication is now handled by OAuth layer in index.ts
+    // MCPServer expects an already-authenticated AuthContext
 
     it("requires uri parameter", async () => {
       const request: MCPRequest = {
@@ -509,7 +420,7 @@ describe("MCPServer", () => {
 
     it("handles internal errors (non-MCPError)", async () => {
       // Create a server instance and mock handleInitialize to throw a plain Error
-      const errorServer = new MCPServer(testAuth);
+      const errorServer = new MCPServer(testAuthContext);
       const originalHandleMessage = errorServer.handleMessage.bind(errorServer);
 
       // Spy on handleMessage to throw a plain Error for a specific test case
@@ -532,7 +443,7 @@ describe("MCPServer", () => {
     });
 
     it("handles non-Error objects thrown as internal errors", async () => {
-      const errorServer = new MCPServer(testAuth);
+      const errorServer = new MCPServer(testAuthContext);
 
       // Mock to throw a non-Error value
       vi.spyOn(errorServer as any, 'handleInitialize').mockImplementation(() => {

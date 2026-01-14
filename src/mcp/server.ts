@@ -1,15 +1,15 @@
-import { MCPRequest, MCPResponse, MCPError, MCPMessage, HappyFoxAuth, ToolNotFoundError, ToolExecutionError, ResourceNotFoundError, MCP_PROTOCOL_VERSION } from '../types';
+import { MCPRequest, MCPResponse, MCPError, MCPMessage, AuthContext, ToolNotFoundError, ToolExecutionError, ResourceNotFoundError, MCP_PROTOCOL_VERSION } from '../types';
 import { ToolRegistry } from './tools/registry';
 import { ResourceRegistry } from './resources/registry';
 import packageJson from '../../package.json';
 
 export class MCPServer {
-  private auth: HappyFoxAuth;
+  private authContext: AuthContext;
   private toolRegistry: ToolRegistry;
   private resourceRegistry: ResourceRegistry;
 
-  constructor(auth: HappyFoxAuth) {
-    this.auth = auth;
+  constructor(authContext: AuthContext) {
+    this.authContext = authContext;
     this.toolRegistry = new ToolRegistry();
     this.resourceRegistry = new ResourceRegistry();
   }
@@ -19,6 +19,12 @@ export class MCPServer {
   // Notifications MUST NOT have 'id' member at all
   private isRequest(message: MCPMessage): message is MCPRequest {
     return 'id' in message;
+  }
+
+  // Validate that id is a valid JSON-RPC 2.0 type (string, number, or null)
+  // Per spec, objects and arrays are NOT valid id types
+  private isValidId(id: unknown): id is string | number | null {
+    return id === null || typeof id === 'string' || typeof id === 'number';
   }
 
   async handleMessage(message: MCPMessage): Promise<MCPResponse | null> {
@@ -34,6 +40,11 @@ export class MCPServer {
             // Unknown notification - silently ignore per spec
             return null;
         }
+      }
+
+      // Validate id type per JSON-RPC 2.0 spec (must be string, number, or null)
+      if (!this.isValidId(message.id)) {
+        throw this.createError(-32600, 'Invalid Request: id must be a string, number, or null');
       }
 
       // Handle requests (must have id, must respond)
@@ -127,7 +138,8 @@ export class MCPServer {
       startIndex = parsed;
     }
 
-    const allTools = await this.toolRegistry.listTools();
+    // Filter tools by granted scopes
+    const allTools = await this.toolRegistry.listTools(this.authContext.scopes);
 
     // Simple pagination: decode cursor as start index, page size of 50
     const pageSize = 50;
@@ -149,12 +161,7 @@ export class MCPServer {
   }
 
   private async handleToolCall(request: MCPRequest): Promise<MCPResponse> {
-    if (!this.auth.apiKey || !this.auth.authCode || !this.auth.accountName) {
-      throw this.createError(
-        -32002,
-        'Authentication required. Include X-HappyFox-ApiKey, X-HappyFox-AuthCode, and X-HappyFox-Account headers.'
-      );
-    }
+    // Auth is validated by OAuth layer - no need for legacy header checks
 
     const { name, arguments: args } = request.params || {};
 
@@ -163,7 +170,8 @@ export class MCPServer {
     }
 
     try {
-      const result = await this.toolRegistry.callTool(name, args || {}, this.auth);
+      // Use OAuth-aware tool call with scope enforcement and staff_id injection
+      const result = await this.toolRegistry.callToolWithAuth(name, args || {}, this.authContext);
 
       return {
         jsonrpc: '2.0',
@@ -228,6 +236,11 @@ export class MCPServer {
   }
 
   private async handleResourcesList(request: MCPRequest): Promise<MCPResponse> {
+    // Check read scope for resource listing (consistent with resources/read)
+    if (!this.authContext.scopes.includes('happyfox:read')) {
+      throw this.createError(-32600, 'Insufficient permissions. Resource access requires happyfox:read scope.');
+    }
+
     const cursor = request.params?.cursor as string | undefined;
 
     // Validate cursor if provided
@@ -262,11 +275,9 @@ export class MCPServer {
   }
 
   private async handleResourceRead(request: MCPRequest): Promise<MCPResponse> {
-    if (!this.auth.apiKey || !this.auth.authCode || !this.auth.accountName) {
-      throw this.createError(
-        -32002,
-        'Authentication required. Include X-HappyFox-ApiKey, X-HappyFox-AuthCode, and X-HappyFox-Account headers.'
-      );
+    // Auth is validated by OAuth layer - check read scope for resources
+    if (!this.authContext.scopes.includes('happyfox:read')) {
+      throw this.createError(-32600, 'Insufficient permissions. Resource access requires happyfox:read scope.');
     }
 
     const { uri } = request.params || {};
@@ -276,7 +287,7 @@ export class MCPServer {
     }
 
     try {
-      const content = await this.resourceRegistry.readResource(uri, this.auth);
+      const content = await this.resourceRegistry.readResource(uri, this.authContext.credentials);
       return {
         jsonrpc: '2.0',
         result: { contents: [content] },

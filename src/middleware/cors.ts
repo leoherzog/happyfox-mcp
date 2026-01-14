@@ -42,17 +42,14 @@ export class CORSMiddleware {
     const headers: Record<string, string> = {
       // MCP 2025-11-25: Support GET, POST, DELETE, OPTIONS
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      // MCP 2025-11-25 headers + HappyFox auth headers
+      // MCP 2025-11-25 headers + OAuth Authorization header
       'Access-Control-Allow-Headers': [
         'Content-Type',
         'Accept',
+        'Authorization',
         'MCP-Session-Id',
         'MCP-Protocol-Version',
-        'Last-Event-ID',
-        'X-HappyFox-ApiKey',
-        'X-HappyFox-AuthCode',
-        'X-HappyFox-Account',
-        'X-HappyFox-Region'
+        'Last-Event-ID'
       ].join(', '),
       // Expose MCP headers to browser
       'Access-Control-Expose-Headers': 'MCP-Session-Id, MCP-Protocol-Version',
