@@ -1,6 +1,6 @@
 {
   "name": "happyfox-mcp",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Cloudflare Worker MCP Server Adapter for HappyFox REST API",
   "main": "src/index.ts",
   "scripts": {
