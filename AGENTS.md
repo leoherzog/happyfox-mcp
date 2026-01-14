@@ -71,6 +71,16 @@ During OAuth consent, the server resolves the user's `staff_id` by matching thei
 - `/.well-known/oauth-authorization-server` - OAuth server metadata (RFC 8414)
 - `/.well-known/oauth-protected-resource` - Protected resource metadata (RFC 9728)
 
+**OAuth Library Workarounds (`@cloudflare/workers-oauth-provider`):**
+
+Two workarounds are implemented for library limitations:
+
+1. **Trailing Slash Mismatch**: The MCP spec requires clients to send a `resource` parameter with a trailing slash (e.g., `https://example.com/`), but the library uses strict equality for audience validation without normalizing trailing slashes. Fix:
+   - During authorization: Strip the `resource` parameter from the grant entirely (lines 520-526)
+   - During token exchange: Wrapper intercepts `/oauth/token` and normalizes trailing slashes (lines 617-652)
+
+2. **Scopes Not Passed to Handler**: The library only passes `ctx.props` to the API handler, not `ctx.scopes`. Fix: Include scopes in `OAuthProps` during authorization and read from `props.scopes` in the handler (see `OAuthProps` interface and `buildAuthContext`).
+
 **MCP Session (MCP 2025-11-25):**
 - Sessions are initiated via `initialize` request
 - Server returns `MCP-Session-Id` header on successful initialize
@@ -244,7 +254,6 @@ The project uses Cloudflare Workers' built-in TypeScript support - no build step
 
 Set in `wrangler.toml` or Cloudflare Dashboard:
 - `ALLOWED_ORIGINS` - (Optional) Comma-separated list of allowed CORS origins
-- `RESOURCE_IDENTIFIER` - (Optional) OAuth resource identifier URL (defaults to worker URL)
 
 **KV Namespace Binding:**
 - `OAUTH_KV` - Cloudflare KV namespace for encrypted credential storage
