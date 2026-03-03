@@ -389,6 +389,19 @@ function generateCsrfToken(): string {
 }
 
 /**
+ * Constant-time string comparison using SHA-256 hashing + timingSafeEqual.
+ * Hashing both values to a fixed size prevents leaking length information.
+ */
+async function timingSafeCompare(a: string, b: string): Promise<boolean> {
+  const encoder = new TextEncoder();
+  const [hashA, hashB] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(a)),
+    crypto.subtle.digest('SHA-256', encoder.encode(b)),
+  ]);
+  return crypto.subtle.timingSafeEqual(hashA, hashB);
+}
+
+/**
  * Handle /authorize endpoint
  */
 async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Response> {
@@ -461,7 +474,7 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
       const csrfCookieMatch = cookieHeader.match(/csrf_token=([^;]+)/);
       const cookieCsrfToken = csrfCookieMatch ? csrfCookieMatch[1] : '';
 
-      if (!formCsrfToken || !cookieCsrfToken || formCsrfToken !== cookieCsrfToken) {
+      if (!formCsrfToken || !cookieCsrfToken || !(await timingSafeCompare(formCsrfToken, cookieCsrfToken))) {
         return new Response(
           renderErrorPage('Invalid Request', 'CSRF token validation failed. Please try again.'),
           { status: 400, headers: { 'Content-Type': 'text/html' } }

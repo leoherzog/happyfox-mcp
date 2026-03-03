@@ -1,0 +1,48 @@
+{
+  "name": "happyfox-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-02-24",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+
+  "placement": {
+    "mode": "smart"
+  },
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true
+    }
+  },
+
+  // KV namespace for OAuth credential storage (REQUIRED)
+  // Setup: wrangler kv namespace create OAUTH_KV
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "bca2a23940a44b1f8e23939b1f71e5c8"
+    }
+  ],
+
+  // Environment-specific configurations (optional)
+  // RESOURCE_IDENTIFIER is derived automatically from the request URL by the OAuth library
+  "env": {
+    "production": {
+      "name": "happyfox-mcp-prod"
+    },
+    "development": {
+      "name": "happyfox-mcp-dev"
+    }
+  }
+
+  // Required secrets (set via: wrangler secret put <NAME>):
+  //   MCP_SESSION_SECRET - Secret key for session token signing (32+ characters recommended)
+  //   CREDENTIAL_ENCRYPTION_KEY - 32-byte base64 key for AES-256-GCM credential encryption
+  //                               Generate with: openssl rand -base64 32
+  //
+  // Environment variables (set in Cloudflare dashboard or via wrangler secret):
+  //   ALLOWED_ORIGINS - Comma-separated list of allowed CORS origins (default: localhost)
+}
