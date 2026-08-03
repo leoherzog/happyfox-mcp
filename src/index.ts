@@ -8,8 +8,8 @@ import { Env, MCPMessage, MCP_PROTOCOL_VERSION, AuthContext } from './types';
 import { MCPServer } from './mcp/server';
 import { CORSMiddleware } from './middleware/cors';
 import { SessionTokenManager } from './session/token';
-import { handleWellKnown } from './oauth/handlers/metadata';
 import { renderConsentPage, renderErrorPage } from './oauth/views/consent';
+import { renderHomePage } from './views/home';
 import { validateAndResolveStaff } from './oauth/services/happyfox-validator';
 import { createCredentialStore } from './oauth/services/credential-store';
 import { AVAILABLE_SCOPES, DEFAULT_SCOPES, StoredCredentials, CREDENTIAL_TTL_SECONDS, HappyFoxScope } from './oauth/types';
@@ -53,7 +53,7 @@ interface OAuthRequestInfo {
   state?: string;
   codeChallenge?: string;
   codeChallengeMethod?: string;
-  resource?: string;
+  resource?: string | string[]; // RFC 8707 allows repeating the parameter
 }
 
 interface ClientInfo {
@@ -351,7 +351,7 @@ class McpApiHandler {
 }
 
 /**
- * Default Handler - Handles non-API requests (consent flow, well-known endpoints)
+ * Default Handler - Handles non-API requests (home page, consent flow)
  * Note: Uses 'any' for env type to satisfy OAuthProvider's generic handler type requirements
  */
 const defaultHandler = {
@@ -359,11 +359,26 @@ const defaultHandler = {
     const typedEnv = env as EnvWithOAuth;
     const url = new URL(request.url);
 
-    // Handle well-known endpoints
-    const wellKnownResponse = handleWellKnown(request, typedEnv);
-    if (wellKnownResponse) {
-      return wellKnownResponse;
+    // Handle the home page (read-only, safe to cache at the edge)
+    if (url.pathname === '/') {
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        return new Response('Method Not Allowed', {
+          status: 405,
+          headers: { 'Allow': 'GET, HEAD', 'Cache-Control': 'no-store' }
+        });
+      }
+      return new Response(renderHomePage(`${url.protocol}//${url.host}`), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400',
+        }
+      });
     }
+
+    // Note: /.well-known/oauth-authorization-server and /.well-known/oauth-protected-resource
+    // (including the RFC 9728 path-suffixed variants) are answered by OAuthProvider before it
+    // delegates here, so there is nothing to route for them.
 
     // Handle authorization endpoint
     if (url.pathname === '/authorize') {
@@ -530,16 +545,11 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
         scopes: requestedScopes, // Include scopes in props since library only passes props to handler
       };
 
-      // Remove resource parameter to avoid audience mismatch issues
-      // The @cloudflare/workers-oauth-provider library does strict equality comparison
-      // without trailing slash normalization, causing failures when Claude sends
-      // resource with trailing slash per MCP spec. Since tokens are opaque and
-      // stored in this server's KV, they can only be validated here anyway.
-      const requestWithoutResource = { ...oauthReq };
-      delete requestWithoutResource.resource;
-
+      // The resource parameter is passed through untouched: as of library v0.4.0,
+      // audience checks parse the URI and treat a bare "/" path as covering the origin,
+      // so the RFC 8707 binding survives the trailing slash that MCP clients send.
       const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
-        request: requestWithoutResource,
+        request: oauthReq,
         userId: tokenId,
         metadata: { staffName: validationResult.staffName, accountName },
         scope: requestedScopes,
@@ -624,43 +634,67 @@ const oauthProvider = new OAuthProvider({
   authorizeEndpoint: '/authorize',
   tokenEndpoint: '/oauth/token',
   scopesSupported: AVAILABLE_SCOPES,
-  refreshTokenTTL: 90 * 24 * 60 * 60, // 90 days
+  refreshTokenTTL: 90 * 24 * 60 * 60, // 90 days (library default is 30)
+
+  // Clients identify themselves with a Client ID Metadata Document URL. Opt-in since
+  // v0.3.0; requires the 'global_fetch_strictly_public' compatibility flag.
+  clientIdMetadataDocumentEnabled: true,
+
+  // handleAuthorize already rejects anything but S256; this makes the library agree.
+  allowPlainPKCE: false,
+
+  // Compare RFC 8707 resource indicators by origin instead of exact string. This server
+  // exposes a single resource on a single origin, so origin matching is equivalent in
+  // strength, and it keeps a client that sends `https://host/` in one request and
+  // `https://host/mcp` in the next from failing token exchange.
+  resourceMatchOriginOnly: true,
 });
 
 /**
- * Wrapper to intercept token requests and normalize the resource parameter.
- * This fixes a bug in @cloudflare/workers-oauth-provider where audience comparison
- * uses strict equality without normalizing trailing slashes.
+ * Public discovery documents: identical for every caller, so they are safe to serve from
+ * the edge cache. The OAuth library answers these itself (including the RFC 9728 §3.1
+ * path-suffixed variants) and sets no Cache-Control of its own.
  */
+function edgeCacheControlFor(pathname: string): string | null {
+  if (pathname === '/.well-known/oauth-authorization-server') {
+    return 'public, max-age=3600';
+  }
+  if (
+    pathname === '/.well-known/oauth-protected-resource' ||
+    pathname.startsWith('/.well-known/oauth-protected-resource/')
+  ) {
+    return 'public, max-age=3600';
+  }
+  return null;
+}
+
+/**
+ * Workers Cache sits in front of this Worker (see `cache` in wrangler.jsonc), so caching
+ * is opt-in. A response is cached only if it sets its own Cache-Control (the home page
+ * does) or is a successful read of a public discovery document. Everything else -
+ * consent, OAuth, MCP - is marked no-store so it can never be served to another user
+ * from the edge.
+ */
+function withCacheDefaults(request: Request, response: Response): Response {
+  if (response.headers.has('Cache-Control')) {
+    return response;
+  }
+
+  const isRead = request.method === 'GET' || request.method === 'HEAD';
+  const cacheControl =
+    (isRead && response.ok ? edgeCacheControlFor(new URL(request.url).pathname) : null) ?? 'no-store';
+
+  const headers = new Headers(response.headers);
+  headers.set('Cache-Control', cacheControl);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-
-    // Intercept token endpoint to normalize resource parameter
-    if (url.pathname === '/oauth/token' && request.method === 'POST') {
-      const contentType = request.headers.get('Content-Type') || '';
-      if (contentType.includes('application/x-www-form-urlencoded')) {
-        const body = await request.text();
-        const params = new URLSearchParams(body);
-
-        if (params.has('resource')) {
-          // Normalize: remove trailing slashes
-          const resource = params.get('resource')!;
-          params.set('resource', resource.replace(/\/+$/, ''));
-
-          // Create new request with modified body
-          const newRequest = new Request(request.url, {
-            method: 'POST',
-            headers: request.headers,
-            body: params.toString(),
-          });
-
-          return oauthProvider.fetch(newRequest, env, ctx);
-        }
-      }
-    }
-
-    // All other requests pass through unchanged
-    return oauthProvider.fetch(request, env, ctx);
+    return withCacheDefaults(request, await oauthProvider.fetch(request, env, ctx));
   },
 };

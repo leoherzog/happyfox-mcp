@@ -8,7 +8,6 @@ export interface Env {
   MCP_SESSION_SECRET: string;  // Required for session token signing (HMAC-SHA256)
   OAUTH_KV: KVNamespace;  // KV namespace for OAuth credential storage
   CREDENTIAL_ENCRYPTION_KEY: string;  // 32-byte base64 key for AES-256-GCM
-  RESOURCE_IDENTIFIER?: string;  // OAuth resource identifier for audience validation
 }
 
 // MCP Protocol version (2025-11-25 Streamable HTTP - no backwards compat)

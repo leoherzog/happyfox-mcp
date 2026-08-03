@@ -1,11 +1,20 @@
 {
   "name": "happyfox-mcp",
   "main": "src/index.ts",
-  "compatibility_date": "2026-02-24",
+  "compatibility_date": "2026-07-30",
   "compatibility_flags": ["global_fetch_strictly_public"],
 
   "placement": {
     "mode": "smart"
+  },
+
+  // Workers Cache: puts Cloudflare's cache in front of this Worker.
+  // Caching is opt-in per response via Cache-Control - only the home page and the
+  // well-known OAuth metadata set one; every other response is sent as no-store
+  // (see withCacheDefaults in src/index.ts).
+  // cross_version_cache is left off so a new deployment starts with a cold cache.
+  "cache": {
+    "enabled": true
   },
 
   "observability": {
@@ -28,7 +37,8 @@
   ],
 
   // Environment-specific configurations (optional)
-  // RESOURCE_IDENTIFIER is derived automatically from the request URL by the OAuth library
+  // The OAuth issuer and resource identifiers are derived from the request URL by the
+  // OAuth library; there is nothing to configure here.
   "env": {
     "production": {
       "name": "happyfox-mcp-prod"

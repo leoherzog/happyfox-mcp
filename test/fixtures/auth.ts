@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { exports as workerExports } from "cloudflare:workers";
 import type { HappyFoxAuth } from "../../src/types";
 import { MCP_PROTOCOL_VERSION } from "../helpers/json-rpc";
 
@@ -38,7 +38,7 @@ export function createAuthHeaders(auth: HappyFoxAuth = mockAuth): Record<string,
  * Call this once per test file/describe block to get a valid session
  */
 export async function getSessionToken(auth: HappyFoxAuth = mockAuth): Promise<string> {
-  const response = await SELF.fetch("https://worker.test/", {
+  const response = await workerExports.default.fetch("https://worker.test/", {
     method: "POST",
     headers: createAuthHeaders(auth),
     body: JSON.stringify({

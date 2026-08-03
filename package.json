@@ -25,14 +25,14 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.2.2"
+    "@cloudflare/workers-oauth-provider": "^0.8.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.12.3",
-    "@cloudflare/workers-types": "^4.20260114.0",
-    "@vitest/coverage-istanbul": "^3.2.4",
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.4",
-    "wrangler": "^4.59.1"
+    "@cloudflare/vitest-pool-workers": "^0.20.1",
+    "@cloudflare/workers-types": "^5.20260801.1",
+    "@vitest/coverage-istanbul": "^4.1.10",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.118.0"
   }
 }

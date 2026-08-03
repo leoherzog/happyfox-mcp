@@ -26,15 +26,28 @@ npm run test:run
 
 ### Request Flow
 ```
-MCP Client → Cloudflare Worker → OAuth Validation → Session Validation → MCP Server → Tool/Resource Registry → HappyFox Client → HappyFox API
-                                      ↓                                                         ↓
-                              Cloudflare KV                                              Reference Cache
-                             (Encrypted Creds)                                           (Cache API)
+MCP Client → Workers Cache → Cloudflare Worker → OAuth Validation → Session Validation → MCP Server → Tool/Resource Registry → HappyFox Client → HappyFox API
+                                                       ↓                                                         ↓
+                                               Cloudflare KV                                              Reference Cache
+                                              (Encrypted Creds)                                           (Cache API)
 ```
+
+### HTTP Routes
+
+| Path | Methods | Description |
+|------|---------|-------------|
+| `/` | GET, HEAD | Read-only home page explaining the server and how to connect (405 otherwise) |
+| `/mcp` | POST, DELETE, OPTIONS | MCP Streamable HTTP endpoint (OAuth protected) |
+| `/authorize` | GET, POST | OAuth consent flow |
+| `/oauth/token` | POST | OAuth token exchange (handled by the library, wrapped for resource normalization) |
+| `/api/validate-staff` | POST | Real-time email validation for the consent form |
+| `/.well-known/oauth-authorization-server` | GET | OAuth server metadata (RFC 8414) |
+| `/.well-known/oauth-protected-resource` | GET | Protected resource metadata (RFC 9728) |
 
 ### Core Components
 
 - **MCP Server** (`src/mcp/server.ts`): Handles JSON-RPC 2.0 protocol, routes MCP methods to appropriate handlers
+- **Home Page** (`src/views/home.ts`): Static, read-only landing page rendered at `/` (Pico CSS, no data collected)
 - **Session Token Manager** (`src/session/token.ts`): Stateless HMAC-SHA256 signed session tokens (1-hour TTL)
 - **Tool Registry** (`src/mcp/tools/registry.ts`): Manages 25+ tools across Tickets, Contacts, and Assets modules
 - **Resource Registry** (`src/mcp/resources/registry.ts`): Provides 7 reference data resources with caching
@@ -70,16 +83,43 @@ During OAuth consent, the server resolves the user's `staff_id` by matching thei
 **Well-Known Endpoints:**
 - `/.well-known/oauth-authorization-server` - OAuth server metadata (RFC 8414)
 - `/.well-known/oauth-protected-resource` - Protected resource metadata (RFC 9728)
+- `/.well-known/oauth-protected-resource/mcp` - Path-suffixed variant (RFC 9728 §3.1); this is the
+  URL the 401 `WWW-Authenticate` challenge points clients at
 
-**OAuth Library Workarounds (`@cloudflare/workers-oauth-provider`):**
+> **These are answered by `@cloudflare/workers-oauth-provider`, not by this codebase.** The
+> library intercepts all three paths before it delegates to `defaultHandler`, so there is
+> nothing to route for them here. Both the issuer and the resource identifier are derived from
+> the request URL.
+>
+> This project used to serve them from `src/oauth/handlers/metadata.ts`. That module was
+> unreachable for the authorization-server path from the start, and the library took over the
+> protected-resource path in v0.4.0 (bringing the path-suffixed variant with it), so it was
+> deleted along with its `RESOURCE_IDENTIFIER` env override. Only the `Cache-Control` those
+> responses used to carry was worth keeping - `edgeCacheControlFor()` in `src/index.ts` now
+> applies it, since the library sets none.
 
-Two workarounds are implemented for library limitations:
+**OAuth Provider Configuration (`@cloudflare/workers-oauth-provider` 0.8.x):**
 
-1. **Trailing Slash Mismatch**: The MCP spec requires clients to send a `resource` parameter with a trailing slash (e.g., `https://example.com/`), but the library uses strict equality for audience validation without normalizing trailing slashes. Fix:
-   - During authorization: Strip the `resource` parameter from the grant entirely (lines 520-526)
-   - During token exchange: Wrapper intercepts `/oauth/token` and normalizes trailing slashes (lines 617-652)
+Non-default options set in `src/index.ts`, each for a reason:
 
-2. **Scopes Not Passed to Handler**: The library only passes `ctx.props` to the API handler, not `ctx.scopes`. Fix: Include scopes in `OAuthProps` during authorization and read from `props.scopes` in the handler (see `OAuthProps` interface and `buildAuthContext`).
+| Option | Value | Why |
+|--------|-------|-----|
+| `clientIdMetadataDocumentEnabled` | `true` | CIMD became opt-in in v0.3.0. Clients here identify by metadata-document URL, so this is required. Needs the `global_fetch_strictly_public` flag. |
+| `allowPlainPKCE` | `false` | `handleAuthorize` already rejects anything but S256; this makes the library enforce it too, and drops `plain` from the advertised metadata. |
+| `resourceMatchOriginOnly` | `true` | Resource indicators are compared by origin rather than exact string. One origin, one resource here, so it is equivalent in strength while tolerating `https://host/` vs `https://host/mcp`. |
+| `refreshTokenTTL` | 90 days | Library default is 30. |
+
+**Remaining library workaround:**
+
+**Scopes Not Passed to Handler**: The library only passes `ctx.props` to the API handler, not
+`ctx.scopes`. Fix: include scopes in `OAuthProps` during authorization and read from
+`props.scopes` in the handler (see the `OAuthProps` interface and `buildAuthContext`). Still
+required as of 0.8.3.
+
+> The old **trailing slash** workaround is gone. v0.4.0 made audience checks parse the URI and
+> treat a bare `/` path as covering the origin, so the `resource` parameter is now passed
+> through to `completeAuthorization()` untouched and the `/oauth/token` rewriting wrapper has
+> been deleted. Tokens are properly audience-bound again.
 
 **MCP Session (MCP 2025-11-25):**
 - Sessions are initiated via `initialize` request
@@ -89,6 +129,38 @@ Two workarounds are implemented for library limitations:
 - Invalid/expired sessions return HTTP 404
 - **Security**: Signature verification uses constant-time comparison (`crypto.subtle.verify`)
 - **Version Binding**: Session tokens are bound to protocol version; tokens created with a different version are rejected
+
+### Caching
+
+Two independent layers:
+
+**1. Workers Cache (edge, in front of the Worker)**
+
+Enabled in `wrangler.jsonc`:
+
+```jsonc
+"cache": { "enabled": true }
+```
+
+On a cache hit Cloudflare serves the response without invoking the Worker at all. Caching is
+**opt-in per response**: `withCacheDefaults()` in `src/index.ts` stamps `Cache-Control: no-store`
+on every response that does not set its own, so only these are cacheable:
+
+| Response | Cache-Control |
+|----------|---------------|
+| `GET /` home page | `public, max-age=3600, stale-while-revalidate=86400` (set by the route) |
+| `GET /.well-known/oauth-*` metadata | `public, max-age=3600` (set by `edgeCacheControlFor`, since the OAuth library sets none) |
+| Everything else (MCP, consent, OAuth, errors) | `no-store` |
+
+The discovery documents are allow-listed by path in `edgeCacheControlFor()` and only when the
+response is a successful GET/HEAD. When adding a route, set `Cache-Control` explicitly only if
+the response is identical for every user. `cross_version_cache` is intentionally left off, so
+each deployment starts with a cold cache.
+
+**2. Reference Cache (Cache API, inside the Worker)**
+
+`src/cache/reference-cache.ts` caches HappyFox reference data (categories, statuses, staff, …) for
+15 minutes, keyed by region + account name.
 
 ### Rate Limiting Strategy
 
@@ -250,6 +322,38 @@ All resources follow the pattern `happyfox://{resource-name}` and return JSON da
 
 The project uses Cloudflare Workers' built-in TypeScript support - no build step required. Wrangler compiles TypeScript on-the-fly during development and deployment.
 
+## Toolchain Notes
+
+- **`compatibility_date`**: `2026-07-30`, matching the `workerd` bundled with Wrangler 4.118.
+  Bump it together with Wrangler so local dev runs the same runtime as production, and rerun
+  `npx wrangler types` afterwards.
+- **`@cloudflare/workers-types` vs generated types**: `tsconfig.json` uses the published
+  `@cloudflare/workers-types` package; `worker-configuration.d.ts` is generated by
+  `wrangler types` and embeds a full copy of the runtime types. Do **not** load both in one
+  program - they collide. Wrangler now recommends the generated file; switching is a separate
+  change.
+
+## Testing Notes (Vitest 4 / vitest-pool-workers 0.20)
+
+The pool was rearchitected in 0.13; three things differ from older examples found online:
+
+- **Config is a Vite plugin.** `vitest.config.mts` uses `cloudflareTest({...})` from
+  `@cloudflare/vitest-pool-workers` inside `plugins`, not `defineWorkersConfig`. The file must be
+  `.mts` - the package is ESM-only and the project has no `"type": "module"`.
+- **`cloudflare:test` is gone.** Use `import { env, exports } from "cloudflare:workers"`;
+  `SELF.fetch(...)` is now `exports.default.fetch(...)`.
+- **`fetchMock` was removed.** `test/helpers/fetch-mock.ts` is a local shim over
+  `globalThis.fetch` that keeps the slice of undici's MockAgent API the suite uses
+  (`get(origin).intercept({path, method}).reply(...)` / `.replyWithError(...)`,
+  `assertNoPendingInterceptors()`). It also fills in response reason phrases, which the
+  `Response` constructor leaves blank but undici set.
+- **Unhandled rejections now fail the run.** When a promise is expected to reject while fake
+  timers advance, attach the assertion *before* advancing (see the retry tests in
+  `test/unit/happyfox/client.test.ts`).
+- Storage isolation is per test file; `isolatedStorage` no longer exists.
+- Tests are not covered by `npm run typecheck` (it is `src` only). Check them with
+  `npx tsc --noEmit -p test/tsconfig.json`.
+
 ## Environment Variables
 
 Set in `wrangler.toml` or Cloudflare Dashboard:
@@ -352,10 +456,10 @@ src/
 ├── index.ts                    # Cloudflare Worker entry point with OAuth provider
 ├── types/
 │   └── index.ts               # TypeScript type definitions (incl. AuthContext)
+├── views/
+│   └── home.ts                # Read-only home page served at /
 ├── oauth/
 │   ├── types.ts               # OAuth type definitions (scopes, credentials)
-│   ├── handlers/
-│   │   └── metadata.ts        # Well-known OAuth metadata endpoints
 │   ├── services/
 │   │   ├── credential-store.ts    # AES-256-GCM encrypted credential storage
 │   │   ├── happyfox-validator.ts  # Credential validation & staff ID resolution
@@ -387,6 +491,8 @@ src/
 
 test/
 ├── unit/
+│   ├── views/
+│   │   └── home.test.ts       # Home page rendering tests
 │   ├── session/
 │   │   └── token.test.ts      # Session token tests
 │   ├── middleware/
@@ -403,5 +509,6 @@ test/
 │   └── auth.ts                # Test authentication helpers
 └── helpers/
     ├── json-rpc.ts            # JSON-RPC request builders
+    ├── fetch-mock.ts          # globalThis.fetch mock (replaces cloudflare:test fetchMock)
     └── fetch-mock-helpers.ts  # HappyFox API mocking utilities
 ```

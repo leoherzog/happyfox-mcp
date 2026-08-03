@@ -1,4 +1,4 @@
-import { fetchMock } from "cloudflare:test";
+import { fetchMock } from "./fetch-mock";
 
 const HAPPYFOX_BASE_US = "https://testaccount.happyfox.com";
 const HAPPYFOX_BASE_EU = "https://testaccount.happyfox.net";
@@ -13,6 +13,8 @@ export function resetFetchMock() {
   fetchMock.activate();
   fetchMock.disableNetConnect();
 }
+
+export { fetchMock };
 
 export function mockHappyFoxGet(
   path: string,

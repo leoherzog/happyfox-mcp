@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fetchMock } from "cloudflare:test";
+import { fetchMock } from "../../helpers/fetch-mock";
 import { HappyFoxClient, HappyFoxAPIError } from "../../../src/happyfox/client";
 import { HappyFoxAuth } from "../../../src/types";
 import { resetFetchMock, mockHappyFoxGet, mockHappyFoxPost, mockHappyFoxPut, mockHappyFoxDelete, mockRateLimitResponse } from "../../helpers/fetch-mock-helpers";
@@ -272,17 +272,19 @@ describe("HappyFoxClient", () => {
         mockRateLimitResponse("/test/", "GET");
       }
 
-      const requestPromise = client.get("/test/");
+      // Attach the rejection handler before advancing timers - the promise settles
+      // while the timers run, and an unattached rejection is an unhandled rejection.
+      const assertion = expect(client.get("/test/")).rejects.toMatchObject({
+        code: "RATE_LIMIT_EXCEEDED",
+        statusCode: 429
+      });
 
       // Advance through all retry delays
       for (let i = 0; i < 6; i++) {
         await vi.advanceTimersByTimeAsync(70000);
       }
 
-      await expect(requestPromise).rejects.toMatchObject({
-        code: "RATE_LIMIT_EXCEEDED",
-        statusCode: 429
-      });
+      await assertion;
     });
 
     it("retries and succeeds after rate limit", async () => {
@@ -393,17 +395,18 @@ describe("HappyFoxClient", () => {
           .replyWithError(new TypeError("Failed to fetch"));
       }
 
-      const requestPromise = client.get("/always-fail/");
+      // Attach the rejection handler before advancing timers (see note above)
+      const assertion = expect(client.get("/always-fail/")).rejects.toMatchObject({
+        code: "NETWORK_ERROR",
+        statusCode: 0
+      });
 
       // Advance through all retry delays
       for (let i = 0; i < 6; i++) {
         await vi.advanceTimersByTimeAsync(70000);
       }
 
-      await expect(requestPromise).rejects.toMatchObject({
-        code: "NETWORK_ERROR",
-        statusCode: 0
-      });
+      await assertion;
     });
 
     it("re-throws HappyFoxAPIError directly without wrapping", async () => {

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { validateAndResolveStaff } from '../../../../src/oauth/services/happyfox-validator';
 import { HappyFoxAuth } from '../../../../src/types';
 import { resetFetchMock, mockHappyFoxGet, mockNetworkError } from '../../../helpers/fetch-mock-helpers';
-import { fetchMock } from 'cloudflare:test';
+import { fetchMock } from '../../../helpers/fetch-mock';
 
 describe('validateAndResolveStaff', () => {
   const testCredentials: HappyFoxAuth = {

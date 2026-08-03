@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { CredentialStore, createCredentialStore } from '../../../../src/oauth/services/credential-store';
 import { StoredCredentials, CREDENTIAL_TTL_SECONDS } from '../../../../src/oauth/types';
-import { env } from 'cloudflare:test';
+import { env } from 'cloudflare:workers';
 
 // Valid 32-byte base64 key (32 bytes = "12345678901234567890123456789012")
 const TEST_ENCRYPTION_KEY = 'MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=';

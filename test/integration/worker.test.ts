@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterEach } from "vitest";
-import { SELF, fetchMock } from "cloudflare:test";
+import { exports as workerExports } from "cloudflare:workers";
+import { fetchMock } from "../helpers/fetch-mock";
 import { MCP_PROTOCOL_VERSION } from "../helpers/json-rpc";
 
 /**
@@ -27,7 +28,7 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
 
   describe("Well-Known Endpoints", () => {
     it("returns OAuth authorization server metadata", async () => {
-      const response = await SELF.fetch("https://worker.test/.well-known/oauth-authorization-server", {
+      const response = await workerExports.default.fetch("https://worker.test/.well-known/oauth-authorization-server", {
         method: "GET"
       });
 
@@ -43,7 +44,7 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
     });
 
     it("returns OAuth protected resource metadata", async () => {
-      const response = await SELF.fetch("https://worker.test/.well-known/oauth-protected-resource", {
+      const response = await workerExports.default.fetch("https://worker.test/.well-known/oauth-protected-resource", {
         method: "GET"
       });
 
@@ -64,7 +65,7 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
 
     it("returns error for missing PKCE (handled by OAuth library)", async () => {
       // Without code_challenge and with CIMD client_id, library throws before we validate
-      const response = await SELF.fetch("https://worker.test/authorize?client_id=https://example.com/.well-known/oauth-client-metadata&redirect_uri=https://example.com/callback&response_type=code&state=test", {
+      const response = await workerExports.default.fetch("https://worker.test/authorize?client_id=https://example.com/.well-known/oauth-client-metadata&redirect_uri=https://example.com/callback&response_type=code&state=test", {
         method: "GET"
       });
 
@@ -73,7 +74,7 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
     });
 
     it("returns error for unsupported response types (handled by OAuth library)", async () => {
-      const response = await SELF.fetch("https://worker.test/authorize?client_id=https://example.com/.well-known/oauth-client-metadata&redirect_uri=https://example.com/callback&response_type=token&code_challenge=test&code_challenge_method=S256", {
+      const response = await workerExports.default.fetch("https://worker.test/authorize?client_id=https://example.com/.well-known/oauth-client-metadata&redirect_uri=https://example.com/callback&response_type=token&code_challenge=test&code_challenge_method=S256", {
         method: "GET"
       });
 
@@ -84,19 +85,54 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
 
   describe("Default Handler Routing", () => {
     it("returns 404 for unknown paths", async () => {
-      const response = await SELF.fetch("https://worker.test/unknown-path", {
+      const response = await workerExports.default.fetch("https://worker.test/unknown-path", {
         method: "GET"
       });
 
       expect(response.status).toBe(404);
     });
 
-    it("returns 404 for root path", async () => {
-      const response = await SELF.fetch("https://worker.test/", {
+    it("marks unknown paths as non-cacheable", async () => {
+      const response = await workerExports.default.fetch("https://worker.test/unknown-path", {
         method: "GET"
       });
 
-      expect(response.status).toBe(404);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+    });
+  });
+
+  describe("Home Page", () => {
+    it("serves the home page at the root path", async () => {
+      const response = await workerExports.default.fetch("https://worker.test/", {
+        method: "GET"
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+
+      const html = await response.text();
+      expect(html).toContain("<title>HappyFox MCP Adapter</title>");
+      // Shows the client-facing MCP endpoint for this deployment
+      expect(html).toContain("https://worker.test/mcp");
+      expect(html).toContain("happyfox:read");
+    });
+
+    it("allows the home page to be cached at the edge", async () => {
+      const response = await workerExports.default.fetch("https://worker.test/", {
+        method: "GET"
+      });
+
+      expect(response.headers.get("Cache-Control")).toContain("public");
+      expect(response.headers.get("Cache-Control")).toContain("max-age=3600");
+    });
+
+    it("rejects non-read methods on the home page", async () => {
+      const response = await workerExports.default.fetch("https://worker.test/", {
+        method: "POST"
+      });
+
+      expect(response.status).toBe(405);
+      expect(response.headers.get("Allow")).toBe("GET, HEAD");
     });
   });
 
@@ -105,7 +141,7 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
     // Full MCP testing requires valid OAuth tokens.
 
     it("requires authentication for /mcp endpoint", async () => {
-      const response = await SELF.fetch("https://worker.test/mcp", {
+      const response = await workerExports.default.fetch("https://worker.test/mcp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -118,10 +154,12 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
 
       // OAuth provider should reject unauthenticated requests
       expect(response.status).toBe(401);
+      // Never cacheable - responses are per-user
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
     });
 
     it("rejects GET requests to /mcp (no SSE support)", async () => {
-      const response = await SELF.fetch("https://worker.test/mcp", {
+      const response = await workerExports.default.fetch("https://worker.test/mcp", {
         method: "GET",
         headers: { "Authorization": "Bearer invalid-token" }
       });
@@ -133,7 +171,7 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
 
   describe("Origin Validation", () => {
     it("allows requests from localhost", async () => {
-      const response = await SELF.fetch("https://worker.test/.well-known/oauth-authorization-server", {
+      const response = await workerExports.default.fetch("https://worker.test/.well-known/oauth-authorization-server", {
         method: "GET",
         headers: {
           "Origin": "http://localhost:3000"
@@ -144,7 +182,7 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
     });
 
     it("allows requests without Origin header (same-origin)", async () => {
-      const response = await SELF.fetch("https://worker.test/.well-known/oauth-authorization-server", {
+      const response = await workerExports.default.fetch("https://worker.test/.well-known/oauth-authorization-server", {
         method: "GET"
       });
 
@@ -154,7 +192,7 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
 
   describe("OPTIONS Preflight", () => {
     it("handles OPTIONS preflight for well-known endpoints", async () => {
-      const response = await SELF.fetch("https://worker.test/.well-known/oauth-authorization-server", {
+      const response = await workerExports.default.fetch("https://worker.test/.well-known/oauth-authorization-server", {
         method: "OPTIONS",
         headers: { Origin: "http://localhost:3000" }
       });
