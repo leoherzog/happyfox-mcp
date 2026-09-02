@@ -10,19 +10,3 @@ export function createMockClient() {
     makeRequest: vi.fn()
   } as unknown as HappyFoxClient;
 }
-
-export function mockClientResponse<T>(
-  client: HappyFoxClient,
-  method: "get" | "post" | "put" | "delete",
-  response: T
-) {
-  (client[method] as any).mockResolvedValue(response);
-}
-
-export function mockClientError(
-  client: HappyFoxClient,
-  method: "get" | "post" | "put" | "delete",
-  error: Error
-) {
-  (client[method] as any).mockRejectedValue(error);
-}

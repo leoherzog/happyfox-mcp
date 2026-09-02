@@ -1,8 +1,45 @@
-import { MCPRequest, MCPResponse, MCPError, MCPMessage, AuthContext, ToolNotFoundError, ToolExecutionError, ResourceNotFoundError, MCP_PROTOCOL_VERSION } from '../types';
+import {
+  MCPRequest,
+  MCPResponse,
+  MCPError,
+  ResultMetaObject,
+  AuthContext,
+  ToolNotFoundError,
+  ToolExecutionError,
+  ResourceNotFoundError,
+  InsufficientScopeError,
+  METHOD_NOT_FOUND,
+  INVALID_PARAMS,
+  INTERNAL_ERROR,
+  META_SERVER_INFO,
+  SERVER_INFO,
+  SERVER_INSTRUCTIONS,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  CACHE_TTL_MS_DISCOVER,
+  CACHE_TTL_MS_STANDARD,
+  type MCPResult,
+  type DiscoverResult,
+  type ListToolsResult,
+  type ListResourcesResult,
+  type ReadResourceResult,
+  type CallToolResult,
+} from '../types';
 import { ToolRegistry } from './tools/registry';
 import { ResourceRegistry } from './resources/registry';
-import packageJson from '../../package.json';
 
+/**
+ * MCP 2026-07-28 protocol layer.
+ *
+ * Stateless: there is no initialize handshake, no session, and no notification
+ * handling. The transport (src/index.ts) validates headers and `params._meta`
+ * and rejects unknown methods with HTTP 404 before dispatching here, so every
+ * request reaching handleRequest has a readable string/number id.
+ *
+ * handleRequest resolves to a JSON-RPC response for every outcome but one:
+ * InsufficientScopeError is rethrown, because an OAuth scope failure is an HTTP
+ * 403 + WWW-Authenticate challenge (authorization spec, "Runtime Insufficient
+ * Scope Errors"), not a JSON-RPC result, and only the transport can build that.
+ */
 export class MCPServer {
   private authContext: AuthContext;
   private toolRegistry: ToolRegistry;
@@ -14,309 +51,284 @@ export class MCPServer {
     this.resourceRegistry = new ResourceRegistry();
   }
 
-  // Type guard to check if message is a request (has id) vs notification (no id)
-  // Per JSON-RPC 2.0: requests MUST have 'id' member (can be null, string, or number)
-  // Notifications MUST NOT have 'id' member at all
-  private isRequest(message: MCPMessage): message is MCPRequest {
-    return 'id' in message;
-  }
-
-  // Validate that id is a valid JSON-RPC 2.0 type (string, number, or null)
-  // Per spec, objects and arrays are NOT valid id types
-  private isValidId(id: unknown): id is string | number | null {
-    return id === null || typeof id === 'string' || typeof id === 'number';
-  }
-
-  async handleMessage(message: MCPMessage): Promise<MCPResponse | null> {
+  async handleRequest(request: MCPRequest): Promise<MCPResponse> {
     try {
-      // Handle notifications (no id, no response)
-      if (!this.isRequest(message)) {
-        switch (message.method) {
-          case 'initialized':
-          case 'notifications/initialized':
-            // Notifications don't receive responses per JSON-RPC 2.0
-            return null;
-          default:
-            // Unknown notification - silently ignore per spec
-            return null;
-        }
-      }
-
-      // Validate id type per JSON-RPC 2.0 spec (must be string, number, or null)
-      if (!this.isValidId(message.id)) {
-        throw this.createError(-32600, 'Invalid Request: id must be a string, number, or null');
-      }
-
-      // Handle requests (must have id, must respond)
-      const request = message as MCPRequest;
       switch (request.method) {
-        case 'initialize':
-          return this.handleInitialize(request);
+        case 'server/discover':
+          return this.handleDiscover(request);
 
         case 'tools/list':
-          return this.handleToolsList(request);
+          return await this.handleToolsList(request);
 
         case 'tools/call':
           return await this.handleToolCall(request);
 
         case 'resources/list':
-          return this.handleResourcesList(request);
+          return await this.handleResourcesList(request);
 
         case 'resources/read':
           return await this.handleResourceRead(request);
 
-        case 'completion/complete':
-          return this.handleCompletion(request);
-
         default:
-          throw this.createError(-32601, 'Method not found');
+          // Unreachable over HTTP: the transport 404s unknown methods first.
+          // Kept as defense in depth for direct callers.
+          throw this.createError(METHOD_NOT_FOUND, `Method not found: ${request.method}`);
       }
     } catch (error) {
-      // Get the id from the message if it's a request, null otherwise (per JSON-RPC 2.0 spec)
-      const id = this.isRequest(message) ? message.id : null;
+      // Scope failures are the transport's to report (HTTP 403 + challenge).
+      if (error instanceof InsufficientScopeError) {
+        throw error;
+      }
 
-      // Check if it's our MCPError (plain object with code and message)
+      // The id is always readable here - the transport rejects malformed
+      // envelopes - so error responses always echo it, and never send null.
       if (error && typeof error === 'object' && 'code' in error && 'message' in error) {
         return {
           jsonrpc: '2.0',
           error: error as MCPError,
-          id
+          id: request.id
         };
       }
       return {
         jsonrpc: '2.0',
         error: {
-          code: -32603,
+          code: INTERNAL_ERROR,
           message: 'Internal error',
           data: error instanceof Error ? error.message : String(error)
         },
-        id
+        id: request.id
       };
     }
   }
 
-  private handleInitialize(request: MCPRequest): MCPResponse {
-    // Read client's requested protocol version
-    const clientVersion = request.params?.protocolVersion as string | undefined;
-
-    // MCP 2025-11-25: Only accept the current protocol version (no backwards compat)
-    if (clientVersion !== MCP_PROTOCOL_VERSION) {
-      throw this.createError(
-        -32602,
-        `Unsupported protocol version: ${clientVersion || 'none'}. This server only supports ${MCP_PROTOCOL_VERSION}`,
-        { supported: [MCP_PROTOCOL_VERSION], requested: clientVersion }
-      );
-    }
-
+  /**
+   * Build a successful response. Every result carries `resultType: "complete"`
+   * and `_meta[io.modelcontextprotocol/serverInfo]`. Caller-supplied meta (e.g.
+   * statusCode/errorCode on tool execution errors) is merged first so serverInfo
+   * can never be clobbered and the caller's keys are never lost.
+   *
+   * The type parameter names the spec result shape being built, so the compiler
+   * enforces its required fields (`ttlMs`/`cacheScope` on the cacheable ones,
+   * `content` on tools/call) instead of leaving them to tests alone.
+   */
+  private success<T extends MCPResult>(
+    request: MCPRequest,
+    payload: Omit<T, 'resultType' | '_meta'>,
+    meta?: ResultMetaObject
+  ): MCPResponse {
     return {
       jsonrpc: '2.0',
+      id: request.id,
       result: {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {
-          tools: {},
-          resources: {}
-        },
-        serverInfo: {
-          name: 'happyfox-mcp',
-          version: packageJson.version
-        }
-      },
-      id: request.id
+        resultType: 'complete',
+        ...payload,
+        _meta: { ...(meta ?? {}), [META_SERVER_INFO]: SERVER_INFO }
+      }
     };
   }
 
+  /**
+   * server/discover - MANDATORY in 2026-07-28. Requires no OAuth scope: its
+   * bytes are identical for every caller, hence cacheScope "public".
+   */
+  private handleDiscover(request: MCPRequest): MCPResponse {
+    return this.success<DiscoverResult>(request, {
+      supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
+      capabilities: {
+        // Bare empty objects: no listChanged (no subscriptions/listen stream to
+        // deliver notifications on), no subscribe, no completions/prompts/logging.
+        tools: {},
+        resources: {}
+      },
+      instructions: SERVER_INSTRUCTIONS,
+      ttlMs: CACHE_TTL_MS_DISCOVER,
+      cacheScope: 'public'
+    });
+  }
+
   private async handleToolsList(request: MCPRequest): Promise<MCPResponse> {
-    const cursor = request.params?.cursor as string | undefined;
+    const cursor = request.params.cursor as string | undefined;
 
     // Validate cursor if provided
     let startIndex = 0;
     if (cursor !== undefined) {
       const parsed = parseInt(cursor, 10);
       if (isNaN(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
-        throw this.createError(-32602, 'Invalid cursor: must be a non-negative integer');
+        throw this.createError(INVALID_PARAMS, 'Invalid cursor: must be a non-negative integer');
       }
       startIndex = parsed;
     }
 
-    // Filter tools by granted scopes
-    const allTools = await this.toolRegistry.listTools(this.authContext.scopes);
+    // Filter tools by granted scopes, then sort by name so the list is
+    // deterministic across requests (byte comparison - localeCompare is
+    // locale-dependent and would not be stable).
+    const allTools = (await this.toolRegistry.listTools(this.authContext.scopes))
+      .slice()
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
     // Simple pagination: decode cursor as start index, page size of 50
     const pageSize = 50;
     const endIndex = Math.min(startIndex + pageSize, allTools.length);
     const pagedTools = allTools.slice(startIndex, endIndex);
 
-    const result: any = { tools: pagedTools };
-
     // Include nextCursor if there are more items
-    if (endIndex < allTools.length) {
-      result.nextCursor = String(endIndex);
-    }
+    const nextCursor = endIndex < allTools.length ? String(endIndex) : undefined;
 
-    return {
-      jsonrpc: '2.0',
-      result,
-      id: request.id
-    };
+    return this.success<ListToolsResult>(request, {
+      tools: pagedTools,
+      ...(nextCursor !== undefined && { nextCursor }),
+      // Scope-filtered per caller, so the cache scope is private on every page.
+      ttlMs: CACHE_TTL_MS_STANDARD,
+      cacheScope: 'private'
+    });
   }
 
   private async handleToolCall(request: MCPRequest): Promise<MCPResponse> {
-    // Auth is validated by OAuth layer - no need for legacy header checks
-
-    const { name, arguments: args } = request.params || {};
+    const { name, arguments: args } = request.params;
 
     if (!name) {
-      throw this.createError(-32602, 'Missing required parameter: name');
+      throw this.createError(INVALID_PARAMS, 'Missing required parameter: name');
     }
 
     try {
       // Use OAuth-aware tool call with scope enforcement and staff_id injection
-      const result = await this.toolRegistry.callToolWithAuth(name, args || {}, this.authContext);
+      const result = await this.toolRegistry.callToolWithAuth(
+        name as string,
+        args || {},
+        this.authContext
+      );
 
-      return {
-        jsonrpc: '2.0',
-        result: {
-          content: [
-            {
-              type: 'text',
-              text: typeof result === 'string' ? result : JSON.stringify(result, null, 2)
-            }
-          ]
-        },
-        id: request.id
-      };
+      // tools/call results are NOT cacheable: no ttlMs, no cacheScope.
+      return this.success<CallToolResult>(request, {
+        content: [
+          {
+            type: 'text',
+            text: typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+          }
+        ]
+      });
     } catch (error) {
-      // ToolNotFoundError is a protocol error - throw to be handled as JSON-RPC error
-      if (error instanceof ToolNotFoundError) {
-        throw this.createError(-32602, error.message);
+      // A scope failure is neither a protocol error nor a tool execution error:
+      // it propagates to the transport, which answers 403 + WWW-Authenticate.
+      if (error instanceof InsufficientScopeError) {
+        throw error;
       }
 
-      // ToolExecutionError returns as tool result with isError: true
-      if (error instanceof ToolExecutionError) {
-        const result: any = {
-          content: [
-            {
-              type: 'text',
-              text: `Error: ${error.message}`
-            }
-          ],
-          isError: true
-        };
+      // ToolNotFoundError is a protocol error - throw to be handled as JSON-RPC error
+      if (error instanceof ToolNotFoundError) {
+        throw this.createError(INVALID_PARAMS, error.message);
+      }
 
-        // Include API error details if available
-        if (error.statusCode !== undefined || error.errorCode !== undefined) {
-          result._meta = {
+      // ToolExecutionError returns as tool result with isError: true. This is a
+      // successful JSON-RPC result, so it still carries resultType: "complete".
+      if (error instanceof ToolExecutionError) {
+        return this.success<CallToolResult>(
+          request,
+          {
+            content: [
+              {
+                type: 'text',
+                text: `Error: ${error.message}`
+              }
+            ],
+            isError: true
+          },
+          // Include API error details if available. Unprefixed _meta keys are
+          // legal in 2026-07-28 (the prefix segment is optional).
+          {
             ...(error.statusCode !== undefined && { statusCode: error.statusCode }),
             ...(error.errorCode !== undefined && { errorCode: error.errorCode })
-          };
-        }
-
-        return {
-          jsonrpc: '2.0',
-          result,
-          id: request.id
-        };
+          }
+        );
       }
 
       // Unknown errors - return as tool error with isError: true
-      return {
-        jsonrpc: '2.0',
-        result: {
-          content: [
-            {
-              type: 'text',
-              text: `Error: ${error instanceof Error ? error.message : String(error)}`
-            }
-          ],
-          isError: true
-        },
-        id: request.id
-      };
+      return this.success<CallToolResult>(request, {
+        content: [
+          {
+            type: 'text',
+            text: `Error: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ],
+        isError: true
+      });
     }
   }
 
   private async handleResourcesList(request: MCPRequest): Promise<MCPResponse> {
-    // Check read scope for resource listing (consistent with resources/read)
-    if (!this.authContext.scopes.includes('happyfox:read')) {
-      throw this.createError(-32600, 'Insufficient permissions. Resource access requires happyfox:read scope.');
-    }
-
-    const cursor = request.params?.cursor as string | undefined;
+    const cursor = request.params.cursor as string | undefined;
 
     // Validate cursor if provided
     let startIndex = 0;
     if (cursor !== undefined) {
       const parsed = parseInt(cursor, 10);
       if (isNaN(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
-        throw this.createError(-32602, 'Invalid cursor: must be a non-negative integer');
+        throw this.createError(INVALID_PARAMS, 'Invalid cursor: must be a non-negative integer');
       }
       startIndex = parsed;
     }
 
-    const allResources = await this.resourceRegistry.listResources();
+    // A server declaring the `resources` capability MUST answer resources/list
+    // with the set available to this caller - which MAY be empty and MAY vary by
+    // the authorization presented. A caller without happyfox:read sees nothing,
+    // expressed as an empty array, never as an error (mirrors handleToolsList).
+    const allResources = this.authContext.scopes.includes('happyfox:read')
+      ? await this.resourceRegistry.listResources()
+      : [];
 
     // Simple pagination: decode cursor as start index, page size of 50
     const pageSize = 50;
     const endIndex = Math.min(startIndex + pageSize, allResources.length);
     const pagedResources = allResources.slice(startIndex, endIndex);
 
-    const result: any = { resources: pagedResources };
-
     // Include nextCursor if there are more items
-    if (endIndex < allResources.length) {
-      result.nextCursor = String(endIndex);
-    }
+    const nextCursor = endIndex < allResources.length ? String(endIndex) : undefined;
 
-    return {
-      jsonrpc: '2.0',
-      result,
-      id: request.id
-    };
+    return this.success<ListResourcesResult>(request, {
+      resources: pagedResources,
+      ...(nextCursor !== undefined && { nextCursor }),
+      // Per-HappyFox-account data: private on every page.
+      ttlMs: CACHE_TTL_MS_STANDARD,
+      cacheScope: 'private'
+    });
   }
 
   private async handleResourceRead(request: MCPRequest): Promise<MCPResponse> {
-    // Auth is validated by OAuth layer - check read scope for resources
-    if (!this.authContext.scopes.includes('happyfox:read')) {
-      throw this.createError(-32600, 'Insufficient permissions. Resource access requires happyfox:read scope.');
-    }
-
-    const { uri } = request.params || {};
+    const { uri } = request.params;
 
     if (!uri) {
-      throw this.createError(-32602, 'Missing required parameter: uri');
+      throw this.createError(INVALID_PARAMS, 'Missing required parameter: uri');
+    }
+
+    // A scope denial is not a resources-feature error (-32602 is for a resource
+    // that does not exist). It propagates to the transport as HTTP 403 with a
+    // WWW-Authenticate insufficient_scope challenge naming the missing scope.
+    if (!this.authContext.scopes.includes('happyfox:read')) {
+      throw new InsufficientScopeError(
+        'Insufficient scope. Resource access requires happyfox:read.',
+        ['happyfox:read']
+      );
     }
 
     try {
-      const content = await this.resourceRegistry.readResource(uri, this.authContext.credentials);
-      return {
-        jsonrpc: '2.0',
-        result: { contents: [content] },
-        id: request.id
-      };
+      const content = await this.resourceRegistry.readResource(
+        uri as string,
+        this.authContext.credentials
+      );
+      return this.success<ReadResourceResult>(request, {
+        contents: [content],
+        ttlMs: CACHE_TTL_MS_STANDARD,
+        cacheScope: 'private'
+      });
     } catch (error) {
       if (error instanceof ResourceNotFoundError) {
-        throw this.createError(-32602, error.message);
+        throw this.createError(INVALID_PARAMS, error.message, { uri });
       }
       throw error;
     }
   }
 
-  private handleCompletion(request: MCPRequest): MCPResponse {
-    // Completion is not implemented - return empty results
-    return {
-      jsonrpc: '2.0',
-      result: {
-        completion: {
-          values: [],
-          total: 0,
-          hasMore: false
-        }
-      },
-      id: request.id
-    };
-  }
-
-  private createError(code: number, message: string, data?: any): MCPError {
+  private createError(code: number, message: string, data?: unknown): MCPError {
     return {
       code,
       message,

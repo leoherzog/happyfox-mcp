@@ -4,7 +4,9 @@ This file provides guidance to Claude, Codex, Gemini, etc when working with code
 
 ## Project Overview
 
-HappyFox MCP Adapter - A serverless Cloudflare Worker that implements the Model Context Protocol (MCP) 2025-11-25 Streamable HTTP transport to bridge MCP-compatible clients with the HappyFox REST API.
+HappyFox MCP Adapter - A serverless Cloudflare Worker that implements the Model Context Protocol (MCP) **2026-07-28** Streamable HTTP transport to bridge MCP-compatible clients with the HappyFox REST API.
+
+The transport is **stateless**: there is no `initialize` handshake, no session, and no SSE stream. Every request is self-describing - it carries its own protocol version, method name and client metadata - and `server/discover` replaces version negotiation. Only `2026-07-28` is supported; there is no backwards compatibility with earlier revisions.
 
 ## Development Commands
 
@@ -26,10 +28,10 @@ npm run test:run
 
 ### Request Flow
 ```
-MCP Client → Workers Cache → Cloudflare Worker → OAuth Validation → Session Validation → MCP Server → Tool/Resource Registry → HappyFox Client → HappyFox API
-                                                       ↓                                                         ↓
-                                               Cloudflare KV                                              Reference Cache
-                                              (Encrypted Creds)                                           (Cache API)
+MCP Client → Workers Cache → Cloudflare Worker → OAuth Validation → Header + _meta Validation → MCP Server → Tool/Resource Registry → HappyFox Client → HappyFox API
+                                                       ↓                                                                                     ↓
+                                               Cloudflare KV                                                                          Reference Cache
+                                              (Encrypted Creds)                                                                          (Cache API)
 ```
 
 ### HTTP Routes
@@ -37,19 +39,21 @@ MCP Client → Workers Cache → Cloudflare Worker → OAuth Validation → Sess
 | Path | Methods | Description |
 |------|---------|-------------|
 | `/` | GET, HEAD | Read-only home page explaining the server and how to connect (405 otherwise) |
-| `/mcp` | POST, DELETE, OPTIONS | MCP Streamable HTTP endpoint (OAuth protected) |
+| `/mcp` | POST, OPTIONS | MCP Streamable HTTP endpoint (Bearer token required). Every other method is 405 |
 | `/authorize` | GET, POST | OAuth consent flow |
-| `/oauth/token` | POST | OAuth token exchange (handled by the library, wrapped for resource normalization) |
+| `/oauth/token` | POST | OAuth token exchange (handled entirely by the library) |
 | `/api/validate-staff` | POST | Real-time email validation for the consent form |
 | `/.well-known/oauth-authorization-server` | GET | OAuth server metadata (RFC 8414) |
 | `/.well-known/oauth-protected-resource` | GET | Protected resource metadata (RFC 9728) |
 
 ### Core Components
 
+- **Transport** (`src/index.ts`, `McpApiHandler`): Validates Origin, HTTP method, headers and `params._meta`, then dispatches to the MCP server. Exported by name so the validation pipeline can be unit-tested directly (the OAuth provider answers 401 before the handler runs, so integration tests cannot reach it)
 - **MCP Server** (`src/mcp/server.ts`): Handles JSON-RPC 2.0 protocol, routes MCP methods to appropriate handlers
+- **Header Helpers** (`src/mcp/headers.ts`): `decodeMcpHeaderValue()` for the `=?base64?…?=` sentinel used by `Mcp-Name`
+- **OAuth challenges** (`McpApiHandler.bearerChallenge` in `src/index.ts`): builds the RFC 6750 `WWW-Authenticate: Bearer` value for the 401 (`invalid_token`) and 403 (`insufficient_scope`) responses
 - **Home Page** (`src/views/home.ts`): Static, read-only landing page rendered at `/` (Pico CSS, no data collected)
-- **Session Token Manager** (`src/session/token.ts`): Stateless HMAC-SHA256 signed session tokens (1-hour TTL)
-- **Tool Registry** (`src/mcp/tools/registry.ts`): Manages 25+ tools across Tickets, Contacts, and Assets modules
+- **Tool Registry** (`src/mcp/tools/registry.ts`): Manages 30 tools across Tickets, Contacts, and Assets modules
 - **Resource Registry** (`src/mcp/resources/registry.ts`): Provides 7 reference data resources with caching
 - **HappyFox Client** (`src/happyfox/client.ts`): HTTP client with exponential backoff for rate limiting (429 responses)
 - **Reference Cache** (`src/cache/reference-cache.ts`): Uses Cloudflare Cache API to cache reference data (15 min TTL)
@@ -121,14 +125,22 @@ required as of 0.8.3.
 > through to `completeAuthorization()` untouched and the `/oauth/token` rewriting wrapper has
 > been deleted. Tokens are properly audience-bound again.
 
-**MCP Session (MCP 2025-11-25):**
-- Sessions are initiated via `initialize` request
-- Server returns `MCP-Session-Id` header on successful initialize
-- Subsequent requests must include `MCP-Session-Id` header
-- Sessions are stateless (HMAC-SHA256 signed tokens with 1-hour TTL)
-- Invalid/expired sessions return HTTP 404
-- **Security**: Signature verification uses constant-time comparison (`crypto.subtle.verify`)
-- **Version Binding**: Session tokens are bound to protocol version; tokens created with a different version are rejected
+### Transport Design
+
+Why this Worker can be fully stateless, and why it has no Durable Objects:
+
+- **Streamable HTTP is a single endpoint.** The response to a client→server message is returned on
+  the same POST, so a stateless Worker can handle a request end-to-end without routing responses
+  across instances. Workers *can* stream from a POST response via the Streams API - SSE was never
+  blocked by the platform - but this server does no server-initiated work and always answers with
+  plain `application/json`.
+- **No server-initiated work means no coordinator.** There are no subscriptions, no progress
+  notifications and no `listChanged` notifications, so there is nothing to push and nothing to keep
+  a stream open for. Durable Objects would only become necessary if server-initiated messages or
+  long-lived streams were added.
+- **Origin validation is a MUST.** If an `Origin` header is present and not allow-listed, the server
+  MUST respond 403 (DNS-rebinding defense). Implemented in `src/middleware/cors.ts`; an *absent*
+  `Origin` is allowed, since every non-browser client omits it.
 
 ### Caching
 
@@ -184,78 +196,248 @@ Basic HTTP authentication with base64 encoded `{apiKey}:{authCode}`
 - Ticket custom fields: `t-cf-{id}`
 - Contact custom fields: `c-cf-{id}`
 
-## MCP Protocol Implementation (2025-11-25)
+## MCP Protocol Implementation (2026-07-28)
 
 ### Protocol Version
-- **Supported Version**: `2025-11-25` (only version supported)
-- **No Backwards Compatibility**: Requests with `protocolVersion: "2024-11-05"` are rejected with error -32602
+
+- **Supported version**: `2026-07-28` only. `SUPPORTED_PROTOCOL_VERSIONS` in `src/types/index.ts`
+  is a one-element list and is what `server/discover` reports.
+- **No handshake**: there is no `initialize`, no `notifications/initialized`, and no session.
+  `server/discover` replaces negotiation - clients MAY call it before anything else to learn the
+  supported versions, capabilities and server identity.
+- **No backwards compatibility**: a request naming any other revision is rejected with HTTP 400 and
+  JSON-RPC error `-32022` (`UnsupportedProtocolVersion`), whose `data` names what is supported.
 
 ### HTTP Methods
+
 | Method | Behavior |
 |--------|----------|
-| POST | Process MCP messages |
-| GET | 405 Method Not Allowed (SSE not implemented) |
-| DELETE | 202 Accepted (session termination acknowledged) |
-| OPTIONS | 204 Preflight response |
+| POST | Process one MCP message. 200 with a JSON-RPC response, or 202 for a notification |
+| OPTIONS | 204 preflight response |
+| GET, DELETE, PUT, PATCH, HEAD, … | **405 Method Not Allowed** with `Allow: POST, OPTIONS` |
 
-> **Note:** DELETE is advisory only. Since sessions use stateless HMAC-signed tokens, the server cannot actually revoke a token. Tokens remain valid until their natural 1-hour expiration. Clients should discard the token on their end after receiving 202.
+Reaching the 405 requires a valid Bearer token - `@cloudflare/workers-oauth-provider` answers 401
+for unauthenticated requests before `McpApiHandler` runs. Both statuses are conformant, so
+integration tests that go through the Worker's default export assert `[401, 405]`, while tests that
+drive `McpApiHandler` directly (with a fake `ctx.props`) assert exactly 405.
 
-### Required Headers (Post-Initialize)
+### Required Headers (all requests)
 
-For all requests after `initialize`, the following headers are **strictly validated**:
+There is no "post-initialize" phase; **every** POST is validated the same way.
 
-| Header | Required | Validation |
-|--------|----------|------------|
-| `MCP-Session-Id` | Yes | Must be valid, unexpired session token |
-| `MCP-Protocol-Version` | Yes | Must exactly match `2025-11-25` |
-| `Accept` | Yes | Must include both `application/json` and `text/event-stream` (or `*/*`) |
-| `Content-Type` | Yes | Must be `application/json` |
+| Header | Required for | Validation |
+|--------|--------------|------------|
+| `MCP-Protocol-Version` | All requests | Must be present, must equal `params._meta["io.modelcontextprotocol/protocolVersion"]`, and must equal `2026-07-28` |
+| `Mcp-Method` | All requests | Must be present and exactly equal `method` in the body |
+| `Mcp-Name` | `tools/call`, `resources/read` | Must be present and equal `params.name` / `params.uri` respectively, **after** sentinel decoding |
+| `Accept` | All requests | Must include both `application/json` and `text/event-stream` (or `*/*`) |
+| `Content-Type` | All requests | Must include `application/json` |
+| `Authorization` | All requests | `Bearer <access-token>` (enforced by the OAuth provider, not by this code) |
 
-**Validation Order**: Headers are validated in this order: MCP-Protocol-Version → Accept → Content-Type → MCP-Session-Id. The first validation failure returns immediately.
+Header **names** are case-insensitive (`Headers.get` handles that). Header **values** are
+case-sensitive and compared with `===` - `Mcp-Method: TOOLS/LIST` for body method `tools/list` is a
+mismatch, not a match.
+
+**`Mcp-Name` sentinel encoding.** A client MAY send a header value that contains non-ASCII
+characters, control characters or leading/trailing whitespace as `=?base64?{StandardBase64}?=`, and
+MUST do so for any plain value that happens to look like the sentinel. `decodeMcpHeaderValue()` in
+`src/mcp/headers.ts` decodes it before comparison: the markers are **lowercase and case-sensitive**,
+the payload uses the **standard** base64 alphabet (`+` and `/`, padded), and the decoded bytes are
+run through `TextDecoder` because `atob` alone yields a binary string and would mis-compare
+non-ASCII names. An undecodable payload is a header validation failure (`-32020`). This server's own
+names (`happyfox_*`, `happyfox://*`) are plain ASCII, so the encoded form is never *required* - but
+the decode path exists because a conforming client may still use it.
+
+> **`Mcp-Session-Id` and `Last-Event-ID` are ignored.** They are never read, never minted and never
+> echoed. Sending them is not an error - the request is processed as if they were absent, and no
+> session header appears on any response. `Mcp-Param-*` headers are likewise ignored: this server
+> annotates no tool parameters, so there is nothing to validate them against.
+
+### Validation Order
+
+Every step short-circuits. CORS headers are attached from step 2 onward except on the 500 and the
+403. **Every 400 carries a JSON-RPC error body** - dual-era clients probe for exactly that to decide
+whether a server is modern. The `id` member is present only when it was read as a string or number;
+otherwise it is **omitted entirely**, never sent as `null`.
+
+| # | Check | On failure |
+|---|-------|------------|
+| 1 | `CREDENTIAL_ENCRYPTION_KEY` is valid 32-byte base64 | 500, `-32603`, no `id`, no CORS headers |
+| 2 | `Origin` absent, or present and allow-listed | 403 `Forbidden: Invalid Origin` (plain text) |
+| 3 | `OPTIONS` | returns the 204 preflight |
+| 4 | `request.method === 'POST'` | 405, `Allow: POST, OPTIONS` (plain text) |
+| 5 | Body parses as JSON | 400, `-32700`, no `id` |
+| 6 | Body is not an array (no batching) | 400, `-32600`, no `id` |
+| 7 | Body is a non-null object | 400, `-32600`, no `id` |
+| 8 | `jsonrpc === "2.0"` | 400, `-32600` |
+| 9 | `method` is a non-empty string | 400, `-32600` |
+| 10 | `"id" in body` - otherwise it is a notification | **202 Accepted**, empty body. No header validation runs, no work is done |
+| 11 | `id` is a string or a number (`null` is invalid) | 400, `-32600`, no `id` |
+| 12 | `Accept` includes `application/json` and `text/event-stream` | 400, `-32600` |
+| 13 | `Content-Type` includes `application/json` | 400, `-32600` |
+| 14 | `Mcp-Method` header present | 400, `-32020` |
+| 15 | `Mcp-Method === body.method` | 400, `-32020` |
+| 16 | `MCP-Protocol-Version` header present | 400, `-32020` |
+| 17 | `params` and `params._meta` are objects, and `_meta` protocolVersion is a string | 400, `-32602` |
+| 18 | header protocol version equals the `_meta` one | 400, `-32020` |
+| 19 | version equals `2026-07-28` | 400, `-32022` + `data: { supported, requested }` |
+| 20 | `_meta` clientCapabilities is an object (**clientInfo is NOT required**) | 400, `-32602` |
+| 21 | `Mcp-Name` present on `tools/call` / `resources/read` | 400, `-32020` |
+| 22 | `Mcp-Name` sentinel decodes | 400, `-32020` |
+| 23 | `params.name` / `params.uri` is a non-empty string | 400, `-32602` (a malformed `CallToolRequest` / `ReadResourceRequest`, not a header mismatch) |
+| 24 | decoded `Mcp-Name` equals that body value | 400, `-32020` |
+| 25 | `method` is in the supported set | **404**, `-32601` |
+| 26 | Stored credentials retrievable for the token | 401, code `401`, `WWW-Authenticate: Bearer error="invalid_token", resource_metadata=…` |
+| 27 | Dispatch to `MCPServer.handleRequest` | **200** with the JSON-RPC response - unless it throws `InsufficientScopeError`: **403**, code `403`, `data.requiredScopes`, `WWW-Authenticate: Bearer error="insufficient_scope", scope="…", resource_metadata=…` |
+
+Two deliberate orderings: header presence and consistency (14-16) are checked **before** version
+support (19), so a client on the wrong revision receives the actionable `-32022` rather than an
+opaque `-32020`; and `Mcp-Name` (21-24) is checked **after** 19 for the same reason.
+
+Everything *returned* by step 27 is HTTP **200**, including application-level `-32602` (unknown tool,
+unknown resource, bad cursor). That is what produces the 400-vs-200 split for `-32602` described in
+the error table below.
+
+### Scope Failures Are HTTP 403, Not JSON-RPC Results
+
+The authorization spec ("Runtime Insufficient Scope Errors") says a request whose token lacks the
+scope for the operation SHOULD get **HTTP 403** with a `WWW-Authenticate: Bearer` challenge carrying
+`error="insufficient_scope"`, `scope="<what the operation needs>"` and `resource_metadata`, so the
+client can step up its authorization. Both scope checks in this server follow that:
+
+- `tools/call` on a tool the token's scopes do not cover (`ToolRegistry.callToolWithAuth`)
+- `resources/read` without `happyfox:read` (`MCPServer.handleResourceRead`)
+
+They throw `InsufficientScopeError` (`src/types/index.ts`), which is the **only** thing
+`MCPServer.handleRequest` lets escape. The transport catches it and builds the 403. The JSON-RPC body
+uses the application-defined code `403` (`INSUFFICIENT_SCOPE`) with `data.requiredScopes`; the code
+sits outside the JSON-RPC reserved range as the spec asks for codes it does not define, and mirrors
+the HTTP status so body and status can never disagree. Do **not** report a scope failure as an
+`isError` tool result, as `-32602`, or as `-32600` - none of those tell the client which scope to ask for.
+
+`resource_metadata` names the path-suffixed document (`/.well-known/oauth-protected-resource/mcp`),
+the same one `@cloudflare/workers-oauth-provider` names on its own 401s. The same helper
+(`McpApiHandler.bearerChallenge`) builds the `invalid_token` challenge for step 26. Because
+`WWW-Authenticate` is not CORS-safelisted, `src/middleware/cors.ts` exposes it - it is the only
+header in `Access-Control-Expose-Headers`, since this server sets no `MCP-*` response headers.
 
 ### Supported Methods
-- `initialize` - Protocol handshake (returns session token in header)
-- `initialized` / `notifications/initialized` - Notification (requires session, returns HTTP 202)
-- `tools/list`, `tools/call` - Tool discovery and execution (requires session)
-- `resources/list`, `resources/read` - Resource discovery and reading (requires session)
-- `completion/complete` - Autocomplete (stub, requires session)
+
+| Method | Notes |
+|--------|-------|
+| `server/discover` | **Mandatory** in this revision. Requires no OAuth scope |
+| `tools/list` | Filtered by the caller's granted scopes; sorted by name; paginated |
+| `tools/call` | Requires `Mcp-Name` matching `params.name`. A tool outside the token's scopes is HTTP 403 + challenge |
+| `resources/list` | Paginated. Filtered by the caller's granted scopes: without `happyfox:read` the list is empty, never an error |
+| `resources/read` | Requires `Mcp-Name` matching `params.uri`. Without `happyfox:read` it is HTTP 403 + challenge |
+
+Anything else - `initialize`, `notifications/initialized`, `completion/complete`, `prompts/list`,
+`resources/templates/list`, `subscriptions/listen`, `ping`, `logging/setLevel`, `tasks/*` - is
+**404 Not Found** with `-32601`. The error message names `2026-07-28` and the supported methods, so
+a legacy client that POSTs `initialize` gets a diagnostic it can surface to its user.
+
+`MCPServer` keeps its own `default:` arm throwing `-32601`. It is unreachable over HTTP (the
+transport 404s first) and exists as defense in depth for direct callers.
 
 ### Message Format (No Batch Support)
-- **Single Messages Only**: MCP 2025-11-25 does not support batch requests
-- **Batch Rejection**: Array payloads return HTTP 400 with error -32600 "Batch requests not supported"
+- **Single messages only**: the POST body must be one JSON-RPC request or notification
+- **Batch rejection**: array payloads return HTTP 400 with `-32600`
+
+### Request Metadata (`params._meta`)
+
+`params` is now **structurally required on every request**, including `server/discover` and
+`tools/list`, which have no other parameters. So is `params._meta`. A body missing either is
+malformed and is rejected with `-32602` at HTTP 400.
+
+| Key | Type | Required | Notes |
+|-----|------|----------|-------|
+| `io.modelcontextprotocol/protocolVersion` | `string` | **Yes** | Must equal the `MCP-Protocol-Version` header |
+| `io.modelcontextprotocol/clientCapabilities` | object | **Yes** | Usually `{}`. This server requires no client capability, so it never emits `-32021` |
+| `io.modelcontextprotocol/clientInfo` | `{ name, version }` | No | Absence is legal and must be tolerated. Self-reported and never used for security decisions |
+
+A minimal valid `params`:
+
+```json
+{ "_meta": {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {} } }
+```
+
+### Result Fields
+
+Every **result** (never an error response) carries `resultType` and a server identity in `_meta`.
+Results that are cacheable additionally carry `ttlMs` (milliseconds) and `cacheScope`.
+
+| Field | Where | Value here |
+|-------|-------|------------|
+| `resultType` | Every result | Always the literal `"complete"` - including on `isError: true` tool results, which are successful JSON-RPC results |
+| `_meta["io.modelcontextprotocol/serverInfo"]` | Every result | `{ name: "happyfox-mcp", version: <package.json version> }` |
+| `ttlMs` / `cacheScope` | `server/discover` | `3600000` / `"public"` - identical bytes for every caller |
+| `ttlMs` / `cacheScope` | `tools/list`, `resources/list`, `resources/read` | `900000` / `"private"` - scope-filtered or per-HappyFox-account, so caches must not be shared across authorization contexts |
+| `ttlMs` / `cacheScope` | `tools/call` | **Absent.** `CallToolResult` is not cacheable; adding them would be as wrong as omitting them elsewhere |
+
+`cacheScope` is `"private"` on everything but `server/discover` because `tools/list` is filtered by
+the caller's OAuth scopes and resources are per-HappyFox-account. Note the unit trap: `ReferenceCache`
+stores its TTL in **seconds** (`900`); the protocol wants **milliseconds**, so the constants
+`CACHE_TTL_MS_DISCOVER` / `CACHE_TTL_MS_STANDARD` in `src/types/index.ts` are the only source used.
+
+`server/discover` declares exactly `capabilities: { tools: {}, resources: {} }` - bare empty objects.
+`listChanged` and `subscribe` are deliberately **not** declared: this server implements no
+`subscriptions/listen` stream, which is the only place those notifications could be delivered in
+this revision, so advertising them would be a promise it cannot keep. `completions`, `prompts` and
+`logging` are not declared either.
 
 ### Response Behavior
-- **Requests (with id)**: Return JSON-RPC response with result or error
-- **Notifications (no id)**: Return HTTP 202 Accepted (no body)
-- **Tool Errors**: Returns `isError: true` in result with `_meta.statusCode` and `_meta.errorCode`
-- **Protocol Errors**: Returns JSON-RPC error (e.g., -32602 for unknown tool/resource)
+- **Requests (with id)**: JSON-RPC response with `result` or `error`, HTTP 200 (or one of the
+  transport statuses above)
+- **Notifications (no id)**: HTTP 202 Accepted, no body, no header validation, no work performed.
+  This revision defines no client-to-server notifications over Streamable HTTP
+- **Tool execution errors** (HappyFox API failures, bad input): `isError: true` in the result, with
+  `_meta.statusCode` and `_meta.errorCode` merged alongside `serverInfo`. Unprefixed `_meta` key
+  names are legal - the prefix segment is optional
+- **Scope failures**: never a result and never a `-326xx` error - HTTP 403 with a
+  `WWW-Authenticate` challenge (see above)
+- **Protocol errors**: JSON-RPC `error`, which carries neither `resultType` nor `_meta`
 
 ### Error Codes
+
 | Scenario | HTTP Status | JSON-RPC Error |
 |----------|-------------|----------------|
-| Server misconfigured (missing secret) | 500 | -32603 |
-| Invalid Origin | 403 | N/A |
-| Batch request | 400 | -32600 |
-| Missing MCP-Protocol-Version header | 400 | -32600 |
-| Wrong MCP-Protocol-Version value | 400 | -32602 |
-| Missing Accept header | 400 | -32600 |
-| Missing session (non-init) | 400 | -32000 |
-| Invalid/expired session | 404 | -32001 |
-| Unsupported protocol version (init) | 200 | -32602 |
+| Invalid Origin | 403 | N/A (plain text) |
+| Non-POST method on `/mcp` | 405 | N/A (plain text, `Allow: POST, OPTIONS`) |
+| Server misconfigured (`CREDENTIAL_ENCRYPTION_KEY`) | 500 | -32603 |
+| Credential retrieval failed (re-authorization needed) | 401 + `WWW-Authenticate` `invalid_token` | 401 (application-defined) |
+| Token lacks the scope for the tool / resource | **403** + `WWW-Authenticate` `insufficient_scope`, `scope=…` | 403 (application-defined) with `data.requiredScopes` |
 | Invalid JSON | 400 | -32700 |
-| Invalid request | 400 | -32600 |
-| Method not found | 200 | -32601 |
-| Invalid params | 200 | -32602 |
+| Batch request, bad envelope, `id: null`, bad `Accept`/`Content-Type` | 400 | -32600 |
+| Unknown method | **404** | -32601 |
+| Missing/malformed `params`, `_meta`, protocolVersion, clientCapabilities; `Mcp-Name` present but `params.name` / `params.uri` absent | **400** | -32602 |
+| Unknown tool, unknown resource (with `data.uri`), invalid cursor | **200** | -32602 |
+| Missing or mismatched `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name`, undecodable sentinel | 400 | -32020 |
+| Unsupported protocol version | 400 | -32022 with `data: { supported, requested }` |
+
+Note the two different obligations attached to `-32602`: a request that is **malformed** at the
+protocol layer must be 400, while an application-level "not found" is a normal outcome and is
+returned inside a 200.
+
+Error-code allocation rules for anything added later: `-32020` to `-32099` is reserved for the MCP
+specification, so implementation-defined codes must not be drawn from it; `-32000` to `-32019` is
+the legacy sub-range and new implementations should not use it at all. `-32002` (resource not found,
+superseded by `-32602`) and `-32042` (URL elicitation required) MUST NOT be emitted. This codebase
+emits only `-32700`, `-32600`, `-32601`, `-32602`, `-32603`, `-32020` and `-32022` from the reserved
+range, plus the application-defined `401` and `403` that accompany the OAuth challenges.
 
 ### Pagination
 - `tools/list` and `resources/list` support cursor-based pagination (50 items per page)
-- Pass `cursor` param to get next page
+- Pass `cursor` param to get next page; the cursor is a non-negative integer start index
+- `cacheScope` is identical across every page of one list; `ttlMs` may differ per page
+- `tools/list` sorts by tool name (plain byte comparison, not `localeCompare`) before paginating, so
+  the order is deterministic across requests and clients can cache the list reliably
 
 ### Available Tool Categories
-- **Tickets**: create, list, get, update, update_tags, update_custom_fields, move_category, staff_reply, private_note, history, forward, delete
-- **Contacts**: create, list, get, update, get_tickets
-- **Contact Groups**: get, create, update, add_contacts, remove_contacts
-- **Assets**: list, get, create, update, delete, list_custom_fields, get_custom_field
+- **Tickets** (14): create_ticket, create_tickets_bulk, list_tickets, get_ticket, update_ticket_tags, update_ticket_custom_fields, move_ticket_category, add_staff_reply, add_private_note, add_contact_reply, forward_ticket, subscribe_to_ticket, unsubscribe_from_ticket, delete_ticket
+- **Contacts & groups** (9): create_contact, list_contacts, get_contact, update_contact, get_contact_group, create_contact_group, update_contact_group, add_contacts_to_group, remove_contacts_from_group
+- **Assets** (7): list_assets, get_asset, create_asset, update_asset, delete_asset, list_asset_custom_fields, get_asset_custom_field
 
 ### Resources vs Tools Design
 
@@ -356,13 +538,14 @@ The pool was rearchitected in 0.13; three things differ from older examples foun
 
 ## Environment Variables
 
-Set in `wrangler.toml` or Cloudflare Dashboard:
-- `ALLOWED_ORIGINS` - (Optional) Comma-separated list of allowed CORS origins
+Set in `wrangler.jsonc` or Cloudflare Dashboard:
+- `ALLOWED_ORIGINS` - (Optional) Comma-separated list of allowed CORS origins. Defaults to
+  `http://localhost:*` and `https://localhost:*`
 
 **KV Namespace Binding:**
 - `OAUTH_KV` - Cloudflare KV namespace for encrypted credential storage
 
-Configure via Cloudflare Dashboard (recommended) or wrangler.toml:
+Configure via Cloudflare Dashboard (recommended) or wrangler.jsonc:
 
 **Dashboard Setup:**
 1. Create the namespace: `wrangler kv namespace create OAUTH_KV`
@@ -371,91 +554,125 @@ Configure via Cloudflare Dashboard (recommended) or wrangler.toml:
 4. Set variable name to `OAUTH_KV` and select the created namespace
 
 **Required Secrets** (set via `wrangler secret put`):
-- `MCP_SESSION_SECRET` - Secret key for signing MCP session tokens
-  - **Minimum length**: 32 characters (validated at startup)
-  - **Failure mode**: Returns HTTP 500 with error -32603 if missing or too short
-  - **Generation**: Use `openssl rand -base64 32` or similar to generate a secure secret
 - `CREDENTIAL_ENCRYPTION_KEY` - AES-256-GCM key for encrypting stored credentials
   - **Format**: 32 bytes, base64 encoded
   - **Generation**: Use `openssl rand -base64 32` to generate
+  - **Failure mode**: every request to `/mcp` returns HTTP 500 with error -32603 if it is missing
+    or does not decode to exactly 32 bytes
 
-## Testing MCP Endpoints (MCP 2025-11-25)
+This is the only secret. There are no others.
 
-The request flow follows an OAuth + session-based pattern. First obtain a Bearer token via OAuth, then use it for MCP requests:
+> **Migration note (2026-07-28):** `MCP_SESSION_SECRET` no longer exists. It signed the session
+> tokens of the superseded 2025-11-25 transport, which this server no longer implements, and
+> nothing reads it. Deleting it from `wrangler.jsonc` does **not** remove it from a deployed
+> Worker - **delete it by hand** in the Cloudflare dashboard (Workers & Pages → your worker →
+> Settings → Variables and Secrets), or with `npx wrangler secret delete MCP_SESSION_SECRET`.
+
+## Testing MCP Endpoints (MCP 2026-07-28)
+
+Every call is independent - there is no ordering requirement and no state carried between them.
+Obtain a Bearer token by completing the OAuth consent flow at `/authorize`, then:
 
 ```bash
-# 0. Obtain OAuth token (via browser OAuth flow or token exchange)
-# The Bearer token is obtained by completing the OAuth consent flow at /authorize
-# For testing, you'll need a valid access token from the OAuth flow
-
-# 1. Initialize (get session ID)
-curl -X POST "http://localhost:8787/mcp" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Authorization: Bearer <access-token>" \
-  -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25"},"id":1}'
-# Response includes MCP-Session-Id header - save this for subsequent requests
-
-# 2. Send initialized notification (returns HTTP 202, no body)
-curl -X POST "http://localhost:8787/mcp" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Authorization: Bearer <access-token>" \
-  -H "MCP-Session-Id: <session-id-from-step-1>" \
-  -H "MCP-Protocol-Version: 2025-11-25" \
-  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-
-# 3. List tools (filtered by OAuth scopes, with pagination)
-curl -X POST "http://localhost:8787/mcp" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Authorization: Bearer <access-token>" \
-  -H "MCP-Session-Id: <session-id>" \
-  -H "MCP-Protocol-Version: 2025-11-25" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","params":{"cursor":"0"},"id":2}'
-
-# 4. Call a tool (list tickets - requires happyfox:read scope)
-curl -X POST "http://localhost:8787/mcp" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Authorization: Bearer <access-token>" \
-  -H "MCP-Session-Id: <session-id>" \
-  -H "MCP-Protocol-Version: 2025-11-25" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"happyfox_list_tickets","arguments":{}},"id":3}'
-
-# 5. Call a tool (add staff reply - requires happyfox:write scope)
-# Note: staff_id is auto-injected from OAuth context if not provided
-curl -X POST "http://localhost:8787/mcp" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Authorization: Bearer <access-token>" \
-  -H "MCP-Session-Id: <session-id>" \
-  -H "MCP-Protocol-Version: 2025-11-25" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"happyfox_add_staff_reply","arguments":{"ticket_id":"123","text":"Reply message"}},"id":4}'
-
-# 6. Read a resource (requires happyfox:read scope)
-curl -X POST "http://localhost:8787/mcp" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Authorization: Bearer <access-token>" \
-  -H "MCP-Session-Id: <session-id>" \
-  -H "MCP-Protocol-Version: 2025-11-25" \
-  -d '{"jsonrpc":"2.0","method":"resources/read","params":{"uri":"happyfox://categories"},"id":5}'
-
-# 7. Terminate session (optional)
-curl -X DELETE "http://localhost:8787/mcp" \
-  -H "Authorization: Bearer <access-token>" \
-  -H "MCP-Session-Id: <session-id>"
-# Returns HTTP 202 Accepted
+TOKEN=<access-token>
+HOST=http://localhost:8787
 ```
+
+```bash
+# server/discover - mandatory in this revision; requires no scope
+curl -X POST "$HOST/mcp" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: server/discover" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientInfo":{"name":"curl","version":"8"},
+        "io.modelcontextprotocol/clientCapabilities":{}}}}'
+```
+
+```bash
+# tools/list - filtered by the token's OAuth scopes, sorted by name, 50 per page
+curl -X POST "$HOST/mcp" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: tools/list" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"cursor":"0","_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{}}}}'
+```
+
+```bash
+# tools/call - Mcp-Name MUST equal params.name. Requires happyfox:read for this tool
+curl -X POST "$HOST/mcp" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: tools/call" \
+  -H "Mcp-Name: happyfox_list_tickets" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+        "name":"happyfox_list_tickets","arguments":{},"_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{}}}}'
+
+# A write example (requires happyfox:write). staff_id is auto-injected from the OAuth
+# context when omitted:
+#   -H "Mcp-Name: happyfox_add_staff_reply"
+#   "name":"happyfox_add_staff_reply","arguments":{"ticket_id":"123","text":"Reply message"}
+```
+
+```bash
+# resources/list - returns only what the caller's scopes permit (empty without happyfox:read)
+curl -X POST "$HOST/mcp" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: resources/list" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"resources/list","params":{"_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{}}}}'
+```
+
+```bash
+# resources/read - Mcp-Name MUST equal params.uri. Requires happyfox:read
+curl -X POST "$HOST/mcp" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: resources/read" \
+  -H "Mcp-Name: happyfox://categories" \
+  -d '{"jsonrpc":"2.0","id":5,"method":"resources/read","params":{
+        "uri":"happyfox://categories","_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{}}}}'
+```
+
+A conforming client MAY send `Mcp-Name` sentinel-encoded instead; the server decodes it before
+comparing, so this is equivalent to the plain form above:
+
+```bash
+  -H "Mcp-Name: =?base64?aGFwcHlmb3g6Ly9jYXRlZ29yaWVz?="
+```
+
+Useful negative checks: dropping `Mcp-Method` gives 400 `-32020`; naming an older revision in both
+the header and `_meta` gives 400 `-32022`; `initialize` gives **404** `-32601`; `GET`/`DELETE` on
+`/mcp` gives 405 with a valid token (401 without one); calling `happyfox_delete_ticket` with a token
+that lacks `happyfox:admin` gives **403** with
+`WWW-Authenticate: Bearer realm="OAuth", resource_metadata="…/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", error_description="…", scope="happyfox:admin"`.
 
 ## Project Structure
 
 ```
 src/
-├── index.ts                    # Cloudflare Worker entry point with OAuth provider
+├── index.ts                    # Worker entry point: OAuth provider + McpApiHandler validation pipeline
 ├── types/
-│   └── index.ts               # TypeScript type definitions (incl. AuthContext)
+│   └── index.ts               # Protocol constants, error codes, _meta keys, result/envelope types
 ├── views/
 │   └── home.ts                # Read-only home page served at /
 ├── oauth/
@@ -463,16 +680,14 @@ src/
 │   ├── services/
 │   │   ├── credential-store.ts    # AES-256-GCM encrypted credential storage
 │   │   ├── happyfox-validator.ts  # Credential validation & staff ID resolution
-│   │   ├── client-metadata.ts     # CIMD fetching and validation
 │   │   └── scope-enforcer.ts      # Tool-to-scope mapping and enforcement
 │   └── views/
 │       └── consent.ts         # OAuth consent page HTML (Pico CSS)
-├── session/
-│   └── token.ts               # Stateless HMAC-SHA256 session token manager
 ├── cache/
 │   └── reference-cache.ts     # Cache API wrapper for reference data
 ├── mcp/
-│   ├── server.ts              # MCP protocol handler
+│   ├── server.ts              # MCP protocol handler (server/discover, tools/*, resources/*)
+│   ├── headers.ts             # Mcp-Name =?base64?…?= sentinel decoding
 │   ├── tools/
 │   │   ├── registry.ts        # Tool registration with scope enforcement
 │   │   ├── tickets.ts         # Ticket tools
@@ -487,28 +702,29 @@ src/
 │       ├── contacts.ts        # Contact API methods
 │       └── assets.ts          # Asset API methods
 └── middleware/
-    └── cors.ts                # CORS handling with MCP headers
+    └── cors.ts                # CORS handling with MCP headers and Origin validation
 
 test/
 ├── unit/
+│   ├── transport/
+│   │   └── mcp-handler.test.ts  # Header/_meta validation pipeline (drives McpApiHandler directly)
+│   ├── mcp/
+│   │   ├── server.test.ts       # Protocol handlers, result shapes, cache hints
+│   │   ├── headers.test.ts      # Sentinel decoding
+│   │   ├── tools/registry.test.ts
+│   │   └── resources/registry.test.ts
 │   ├── views/
-│   │   └── home.test.ts       # Home page rendering tests
-│   ├── session/
-│   │   └── token.test.ts      # Session token tests
+│   │   └── home.test.ts         # Home page rendering tests
 │   ├── middleware/
-│   │   └── cors.test.ts       # CORS middleware tests
+│   │   └── cors.test.ts         # CORS middleware tests
+│   ├── cache/, happyfox/, oauth/
 │   └── types/
-│       └── errors.test.ts     # Error handling tests
+│       └── errors.test.ts       # Error handling tests
 ├── integration/
-│   ├── worker.test.ts         # OAuth endpoint tests
-│   ├── json-rpc.test.ts       # JSON-RPC protocol tests (requires OAuth)
-│   ├── mcp-protocol.test.ts   # MCP protocol compliance tests (requires OAuth)
-│   ├── tools/                 # Tool integration tests (requires OAuth)
-│   └── resources/             # Resource integration tests (requires OAuth)
-├── fixtures/
-│   └── auth.ts                # Test authentication helpers
+│   └── worker.test.ts           # OAuth endpoint and unauthenticated /mcp behavior
 └── helpers/
-    ├── json-rpc.ts            # JSON-RPC request builders
-    ├── fetch-mock.ts          # globalThis.fetch mock (replaces cloudflare:test fetchMock)
-    └── fetch-mock-helpers.ts  # HappyFox API mocking utilities
+    ├── json-rpc.ts              # 2026-07-28 request/header builders (no session helper, ever)
+    ├── client-mock.ts           # HappyFoxClient stub
+    ├── fetch-mock.ts            # globalThis.fetch mock (replaces cloudflare:test fetchMock)
+    └── fetch-mock-helpers.ts    # HappyFox API mocking utilities
 ```

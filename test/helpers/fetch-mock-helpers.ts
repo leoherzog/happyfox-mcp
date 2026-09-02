@@ -3,7 +3,7 @@ import { fetchMock } from "./fetch-mock";
 const HAPPYFOX_BASE_US = "https://testaccount.happyfox.com";
 const HAPPYFOX_BASE_EU = "https://testaccount.happyfox.net";
 
-export function getHappyFoxBase(region: "us" | "eu" = "us"): string {
+function getHappyFoxBase(region: "us" | "eu" = "us"): string {
   return region === "us" ? HAPPYFOX_BASE_US : HAPPYFOX_BASE_EU;
 }
 
@@ -124,23 +124,5 @@ export function mockNetworkError(
       method
     })
     .replyWithError(new Error("Network error"));
-  return pool;
-}
-
-export function mockServerError(
-  path: string,
-  method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
-  region: "us" | "eu" = "us"
-) {
-  const base = getHappyFoxBase(region);
-  const pool = fetchMock.get(base);
-  pool
-    .intercept({
-      path: (actualPath: string) => actualPath.startsWith(`/api/1.1/json${path}`),
-      method
-    })
-    .reply(500, "Internal Server Error", {
-      headers: { "Content-Type": "text/plain" }
-    });
   return pool;
 }

@@ -1,4 +1,4 @@
-import { MCPTool, HappyFoxAuth, AuthContext, ToolNotFoundError, ToolExecutionError } from '../../types';
+import { MCPTool, HappyFoxAuth, AuthContext, ToolNotFoundError, ToolExecutionError, InsufficientScopeError } from '../../types';
 import { HappyFoxAPIError } from '../../happyfox/client';
 import { TicketTools } from './tickets';
 import { ContactTools } from './contacts';
@@ -59,13 +59,13 @@ export class ToolRegistry {
       throw new ToolNotFoundError(name);
     }
 
-    // Enforce scope permissions
+    // Enforce scope permissions. Not a tool execution error: the transport turns
+    // this into HTTP 403 + WWW-Authenticate so the client can step up.
     if (!hasRequiredScopes(authContext.scopes, name)) {
-      const requiredScopes = getRequiredScopes(name);
-      throw new ToolExecutionError(
-        `Insufficient permissions. Tool '${name}' requires scope: ${requiredScopes?.join(' or ')}`,
-        403,
-        'FORBIDDEN'
+      const requiredScopes = getRequiredScopes(name) ?? [];
+      throw new InsufficientScopeError(
+        `Insufficient scope. Tool '${name}' requires scope: ${requiredScopes.join(' or ')}`,
+        requiredScopes
       );
     }
 

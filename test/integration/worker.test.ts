@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { exports as workerExports } from "cloudflare:workers";
 import { fetchMock } from "../helpers/fetch-mock";
-import { MCP_PROTOCOL_VERSION } from "../helpers/json-rpc";
+import { createRequest, createMCPHeaders } from "../helpers/json-rpc";
 
 /**
  * Worker Integration Tests for OAuth-Protected MCP Server
@@ -143,13 +143,8 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
     it("requires authentication for /mcp endpoint", async () => {
       const response = await workerExports.default.fetch("https://worker.test/mcp", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "initialize",
-          params: { protocolVersion: MCP_PROTOCOL_VERSION },
-          id: 1
-        })
+        headers: createMCPHeaders("server/discover"),
+        body: JSON.stringify(createRequest("server/discover"))
       });
 
       // OAuth provider should reject unauthenticated requests
@@ -158,13 +153,22 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
       expect(response.headers.get("Cache-Control")).toBe("no-store");
     });
 
-    it("rejects GET requests to /mcp (no SSE support)", async () => {
+    it("rejects GET requests to /mcp", async () => {
       const response = await workerExports.default.fetch("https://worker.test/mcp", {
         method: "GET",
         headers: { "Authorization": "Bearer invalid-token" }
       });
 
-      // May be 401 (auth) or 405 (method) depending on auth check order
+      // 401 from the OAuth provider (it runs first) or 405 from the transport.
+      expect([401, 405]).toContain(response.status);
+    });
+
+    it("rejects DELETE requests to /mcp (there is no session to terminate)", async () => {
+      const response = await workerExports.default.fetch("https://worker.test/mcp", {
+        method: "DELETE",
+        headers: { "Authorization": "Bearer invalid-token" }
+      });
+
       expect([401, 405]).toContain(response.status);
     });
   });

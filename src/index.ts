@@ -1,13 +1,36 @@
 /**
  * HappyFox MCP Adapter - Cloudflare Worker Entry Point
- * MCP 2025-11-25 Streamable HTTP Transport with OAuth 2.0 Authentication
+ * MCP 2026-07-28 Streamable HTTP Transport with OAuth 2.0 Authentication
  */
 
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
-import { Env, MCPMessage, MCP_PROTOCOL_VERSION, AuthContext } from './types';
+import {
+  Env,
+  AuthContext,
+  MCPRequest,
+  MCPResponse,
+  MCP_PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  SUPPORTED_METHODS,
+  METHODS_REQUIRING_MCP_NAME,
+  META_PROTOCOL_VERSION,
+  META_CLIENT_CAPABILITIES,
+  PARSE_ERROR,
+  INVALID_REQUEST,
+  METHOD_NOT_FOUND,
+  INVALID_PARAMS,
+  INTERNAL_ERROR,
+  HEADER_MISMATCH,
+  UNSUPPORTED_PROTOCOL_VERSION,
+  UNAUTHORIZED,
+  INSUFFICIENT_SCOPE,
+  InsufficientScopeError,
+  isSupportedMethod,
+  type UnsupportedProtocolVersionData,
+} from './types';
 import { MCPServer } from './mcp/server';
 import { CORSMiddleware } from './middleware/cors';
-import { SessionTokenManager } from './session/token';
+import { decodeMcpHeaderValue, HeaderValueError } from './mcp/headers';
 import { renderConsentPage, renderErrorPage } from './oauth/views/consent';
 import { renderHomePage } from './views/home';
 import { validateAndResolveStaff } from './oauth/services/happyfox-validator';
@@ -102,10 +125,18 @@ async function buildAuthContext(
 
 /**
  * MCP API Handler - Processes authenticated MCP requests
+ *
+ * MCP 2026-07-28 is stateless. `Mcp-Session-Id` and `Last-Event-ID` are never read,
+ * never minted and never echoed - inbound copies are ignored, not rejected. Do not
+ * re-introduce them.
+ *
  * Note: Uses 'any' for env/ctx types to satisfy OAuthProvider's generic handler type requirements.
  * The OAuth provider adds 'props' and 'scopes' to the ctx object at runtime.
+ *
+ * Exported so the validation pipeline can be exercised directly in tests (the OAuth
+ * provider answers 401 before the handler runs, so integration tests cannot reach it).
  */
-class McpApiHandler {
+export class McpApiHandler {
   async fetch(
     request: Request,
     env: any,
@@ -113,227 +144,290 @@ class McpApiHandler {
   ): Promise<Response> {
     const typedEnv = env as Env;
     const typedCtx = ctx as ExecutionContext & { props: OAuthProps; scopes: string[] };
-    // Validate configuration
-    if (!typedEnv.MCP_SESSION_SECRET || typedEnv.MCP_SESSION_SECRET.length < 32) {
-      return this.jsonRpcError(-32603, 'Internal error: Server misconfigured.', null, 500);
-    }
 
-    // Validate CREDENTIAL_ENCRYPTION_KEY (must be valid 32-byte base64 for AES-256-GCM)
+    // 1. Validate CREDENTIAL_ENCRYPTION_KEY (must be valid 32-byte base64 for AES-256-GCM)
     if (!this.isValidEncryptionKey(typedEnv.CREDENTIAL_ENCRYPTION_KEY)) {
-      return this.jsonRpcError(-32603, 'Internal error: Server misconfigured.', null, 500);
+      return this.jsonRpcError(INTERNAL_ERROR, 'Internal error: Server misconfigured.', undefined, 500);
     }
 
     const corsMiddleware = new CORSMiddleware(typedEnv.ALLOWED_ORIGINS);
     const origin = request.headers.get('Origin');
 
-    // CORS validation
+    // 2. Origin validation - an absent Origin is allowed (non-browser clients)
     if (!corsMiddleware.isOriginValid(origin)) {
       return corsMiddleware.handleInvalidOrigin();
     }
 
     const corsHeaders = corsMiddleware.getCORSHeaders(origin);
 
-    // Handle OPTIONS preflight
+    // 3. Handle OPTIONS preflight
     if (request.method === 'OPTIONS') {
       return corsMiddleware.handlePreflight(origin);
     }
 
-    // Handle GET (SSE streaming - not implemented)
-    if (request.method === 'GET') {
-      return new Response('SSE streaming not supported', {
-        status: 405,
-        headers: { ...corsHeaders, 'Allow': 'POST, OPTIONS, DELETE' }
-      });
-    }
-
-    // Handle DELETE (session termination)
-    if (request.method === 'DELETE') {
-      return new Response(null, { status: 202, headers: corsHeaders });
-    }
-
-    // Only POST from here
+    // 4. POST is the only method this transport accepts. No SSE stream (GET), no
+    //    session termination (DELETE) - both are gone with the session concept.
     if (request.method !== 'POST') {
-      return new Response('Method not allowed', {
+      return new Response('Method Not Allowed. This server implements MCP 2026-07-28 (POST only).', {
         status: 405,
-        headers: { ...corsHeaders, 'Allow': 'POST, OPTIONS, DELETE' }
+        headers: { ...corsHeaders, 'Allow': 'POST, OPTIONS', 'Content-Type': 'text/plain' }
       });
     }
 
-    // Check if MCP headers are present BEFORE parsing JSON
-    // This ensures header errors take precedence over parse errors for non-initialize requests
-    const hasMcpHeaders = this.hasMcpHeaders(request);
-
-    // Parse request body
+    // 5. Parse request body
     let rawBody: unknown;
     try {
       rawBody = await request.json();
     } catch {
-      // If MCP headers are missing and JSON is invalid, return header error
-      // (we can't determine if it's initialize, so assume it's not)
-      if (!hasMcpHeaders) {
-        return this.jsonRpcError(-32600, 'Invalid Request: MCP-Protocol-Version header required.', null, 400, corsHeaders);
-      }
-      return this.jsonRpcError(-32700, 'Parse error: Invalid JSON', null, 400, corsHeaders);
+      return this.jsonRpcError(PARSE_ERROR, 'Parse error: Invalid JSON', undefined, 400, corsHeaders);
     }
 
-    // Reject batch requests
+    // 6. Reject batch requests - one JSON-RPC message per POST
     if (Array.isArray(rawBody)) {
-      return this.jsonRpcError(-32600, 'Invalid Request: Batch requests not supported.', null, 400, corsHeaders);
+      return this.jsonRpcError(INVALID_REQUEST, 'Invalid Request: Batch requests are not supported.', undefined, 400, corsHeaders);
     }
 
-    // Validate JSON-RPC 2.0 structure
-    if (!rawBody || typeof rawBody !== 'object' || (rawBody as Record<string, unknown>).jsonrpc !== '2.0') {
-      const rawId = (rawBody && typeof rawBody === 'object' && 'id' in rawBody)
-        ? (rawBody as Record<string, unknown>).id
-        : null;
-      const id = (typeof rawId === 'string' || typeof rawId === 'number' || rawId === null) ? rawId : null;
-      return this.jsonRpcError(-32600, 'Invalid Request: Missing or invalid jsonrpc field', id, 400, corsHeaders);
+    // 7. The body must be a single JSON-RPC object
+    if (!rawBody || typeof rawBody !== 'object') {
+      return this.jsonRpcError(INVALID_REQUEST, 'Invalid Request: Body must be a single JSON-RPC request object.', undefined, 400, corsHeaders);
     }
 
     const body = rawBody as Record<string, unknown>;
+    const id = this.readId(body);
+
+    // 8. jsonrpc envelope
+    if (body.jsonrpc !== '2.0') {
+      return this.jsonRpcError(INVALID_REQUEST, 'Invalid Request: Missing or invalid jsonrpc field', id, 400, corsHeaders);
+    }
+
+    // 9. method
     if (typeof body.method !== 'string' || body.method.length === 0) {
-      const rawId = body.id;
-      const id = (typeof rawId === 'string' || typeof rawId === 'number' || rawId === null) ? rawId : null;
-      return this.jsonRpcError(-32600, 'Invalid Request: Missing or invalid method field', id, 400, corsHeaders);
+      return this.jsonRpcError(INVALID_REQUEST, 'Invalid Request: Missing or invalid method field', id, 400, corsHeaders);
     }
+    const method = body.method;
 
-    const message = rawBody as MCPMessage;
-    const isInitialize = message.method === 'initialize';
-
-    // Validate MCP headers for non-initialize requests
-    if (!isInitialize) {
-      const headerError = this.validateMcpHeaders(request, message, corsHeaders);
-      if (headerError) return headerError;
-
-      // Session validation
-      const sessionError = await this.validateSession(request, typedEnv, message, corsHeaders);
-      if (sessionError) return sessionError;
-    }
-
-    // Build AuthContext from OAuth props
-    let authContext: AuthContext;
-    try {
-      authContext = await buildAuthContext(typedCtx.props, typedEnv);
-    } catch (error) {
-      return this.jsonRpcError(
-        -32002,
-        'Authentication error: Unable to retrieve credentials. Please re-authorize.',
-        'id' in message ? message.id : null,
-        401,
-        corsHeaders
-      );
-    }
-
-    // Process the message
-    const mcpServer = new MCPServer(authContext);
-    const response = await mcpServer.handleMessage(message);
-
-    // Handle notifications (no response body)
-    if (response === null) {
+    // 10. No id means a notification. This revision defines no client-to-server
+    //     notifications, so accept it, do no work, and run no header validation.
+    if (!('id' in body)) {
       return new Response(null, { status: 202, headers: corsHeaders });
     }
 
-    // Build response headers
-    const responseHeaders: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...corsHeaders
-    };
-
-    // Add session ID to initialize response
-    if (isInitialize && response.result) {
-      const tokenManager = new SessionTokenManager(typedEnv.MCP_SESSION_SECRET);
-      const capabilities = Object.keys(response.result.capabilities || {});
-      const sessionToken = await tokenManager.createToken(MCP_PROTOCOL_VERSION, capabilities);
-      responseHeaders['MCP-Session-Id'] = sessionToken;
+    // 11. Requests MUST carry a string or number id - unlike base JSON-RPC, null is invalid
+    if (id === undefined) {
+      return this.jsonRpcError(INVALID_REQUEST, 'Invalid Request: id must be a string or a number', undefined, 400, corsHeaders);
     }
 
-    return new Response(JSON.stringify(response), { headers: responseHeaders });
-  }
-
-  private validateMcpHeaders(
-    request: Request,
-    message: MCPMessage,
-    corsHeaders: Record<string, string>
-  ): Response | null {
-    const id = 'id' in message ? message.id : null;
-
-    // Validate MCP-Protocol-Version header
-    const protocolVersionHeader = request.headers.get('MCP-Protocol-Version');
-    if (!protocolVersionHeader) {
-      return this.jsonRpcError(-32600, 'Invalid Request: MCP-Protocol-Version header required.', id, 400, corsHeaders);
-    }
-    if (protocolVersionHeader !== MCP_PROTOCOL_VERSION) {
-      return this.jsonRpcError(-32602, `Unsupported protocol version: ${protocolVersionHeader}`, id, 400, corsHeaders);
-    }
-
-    // Validate Accept header
+    // 12. Accept header
     const acceptHeader = request.headers.get('Accept') || '';
     const hasJson = acceptHeader.includes('application/json') || acceptHeader.includes('*/*');
     const hasSSE = acceptHeader.includes('text/event-stream') || acceptHeader.includes('*/*');
     if (!hasJson || !hasSSE) {
-      return this.jsonRpcError(-32600, 'Invalid Request: Accept header must include application/json and text/event-stream.', id, 400, corsHeaders);
+      return this.jsonRpcError(INVALID_REQUEST, 'Invalid Request: Accept header must include application/json and text/event-stream.', id, 400, corsHeaders);
     }
 
-    // Validate Content-Type header
+    // 13. Content-Type header
     const contentType = request.headers.get('Content-Type');
     if (!contentType || !contentType.includes('application/json')) {
-      return this.jsonRpcError(-32600, 'Invalid Request: Content-Type must be application/json', id, 400, corsHeaders);
+      return this.jsonRpcError(INVALID_REQUEST, 'Invalid Request: Content-Type must be application/json', id, 400, corsHeaders);
     }
 
-    return null;
-  }
-
-  private async validateSession(
-    request: Request,
-    env: Env,
-    message: MCPMessage,
-    corsHeaders: Record<string, string>
-  ): Promise<Response | null> {
-    const id = 'id' in message ? message.id : null;
-    const sessionId = request.headers.get('MCP-Session-Id');
-
-    if (!sessionId) {
-      return this.jsonRpcError(-32000, 'Bad Request: MCP-Session-Id header required.', id, 400, corsHeaders);
+    // 14/15. Mcp-Method must be present and match the body method exactly.
+    //        Header names are case-insensitive; header values are case-sensitive.
+    const mcpMethodHeader = request.headers.get('Mcp-Method');
+    if (!mcpMethodHeader) {
+      return this.jsonRpcError(HEADER_MISMATCH, `Header mismatch: Mcp-Method header is required. This server implements MCP ${MCP_PROTOCOL_VERSION} only.`, id, 400, corsHeaders);
+    }
+    if (mcpMethodHeader !== method) {
+      return this.jsonRpcError(HEADER_MISMATCH, `Header mismatch: Mcp-Method header value '${mcpMethodHeader}' does not match body value '${method}'`, id, 400, corsHeaders);
     }
 
-    const tokenManager = new SessionTokenManager(env.MCP_SESSION_SECRET);
-    const validation = await tokenManager.validateToken(sessionId);
-
-    if (!validation.valid) {
-      const statusCode = validation.error === 'expired' || validation.error === 'invalid' ? 404 : 400;
-      const errorMessage = validation.error === 'expired'
-        ? 'Session expired. Please re-initialize.'
-        : validation.error === 'invalid'
-        ? 'Invalid session. Please re-initialize.'
-        : 'Malformed session token.';
-      return this.jsonRpcError(-32001, errorMessage, id, statusCode, corsHeaders);
+    // 16. MCP-Protocol-Version must be present
+    const protocolVersionHeader = request.headers.get('MCP-Protocol-Version');
+    if (!protocolVersionHeader) {
+      return this.jsonRpcError(HEADER_MISMATCH, `Header mismatch: MCP-Protocol-Version header is required. This server implements MCP ${MCP_PROTOCOL_VERSION} only.`, id, 400, corsHeaders);
     }
 
-    return null;
-  }
+    // 17. params and params._meta are structurally required on every request
+    const params = this.asObject(body.params);
+    const meta = params ? this.asObject(params._meta) : undefined;
+    const metaProtocolVersion = meta ? meta[META_PROTOCOL_VERSION] : undefined;
+    if (!params || !meta || typeof metaProtocolVersion !== 'string') {
+      return this.jsonRpcError(INVALID_PARAMS, `Invalid params: params._meta['${META_PROTOCOL_VERSION}'] is required and must be a string`, id, 400, corsHeaders);
+    }
 
-  private jsonRpcError(
-    code: number,
-    message: string,
-    id: string | number | null,
-    status: number,
-    corsHeaders: Record<string, string> = {}
-  ): Response {
-    return new Response(JSON.stringify({
-      jsonrpc: '2.0',
-      error: { code, message },
-      id
-    }), {
-      status,
+    // 18. The header and the body must agree on the protocol version
+    if (protocolVersionHeader !== metaProtocolVersion) {
+      return this.jsonRpcError(HEADER_MISMATCH, `Header mismatch: MCP-Protocol-Version header value '${protocolVersionHeader}' does not match body value '${metaProtocolVersion}'`, id, 400, corsHeaders);
+    }
+
+    // 19. This server implements exactly one revision
+    if (metaProtocolVersion !== MCP_PROTOCOL_VERSION) {
+      return this.jsonRpcError(
+        UNSUPPORTED_PROTOCOL_VERSION,
+        `Unsupported protocol version: ${metaProtocolVersion}`,
+        id,
+        400,
+        corsHeaders,
+        {
+          supported: [...SUPPORTED_PROTOCOL_VERSIONS],
+          requested: metaProtocolVersion,
+        } satisfies UnsupportedProtocolVersionData
+      );
+    }
+
+    // 20. clientCapabilities is required; clientInfo is NOT - its absence is legal
+    if (!this.asObject(meta[META_CLIENT_CAPABILITIES])) {
+      return this.jsonRpcError(INVALID_PARAMS, `Invalid params: params._meta['${META_CLIENT_CAPABILITIES}'] is required and must be an object`, id, 400, corsHeaders);
+    }
+
+    // 21-24. Mcp-Name mirrors params.name / params.uri on the methods that carry one
+    if (METHODS_REQUIRING_MCP_NAME.includes(method)) {
+      const rawMcpName = request.headers.get('Mcp-Name');
+      if (!rawMcpName) {
+        return this.jsonRpcError(HEADER_MISMATCH, `Header mismatch: Mcp-Name header is required for ${method}`, id, 400, corsHeaders);
+      }
+
+      let decodedMcpName: string;
+      try {
+        decodedMcpName = decodeMcpHeaderValue(rawMcpName);
+      } catch (error) {
+        if (error instanceof HeaderValueError) {
+          return this.jsonRpcError(HEADER_MISMATCH, error.message, id, 400, corsHeaders);
+        }
+        throw error;
+      }
+
+      // An absent or non-string mirrored body field is a malformed request
+      // (it fails the CallToolRequest / ReadResourceRequest schema), which the
+      // tools page classes as a protocol error: -32602, at HTTP 400 like every
+      // other structurally invalid request. -32020 is reserved for a header
+      // that disagrees with a body value that is actually there.
+      const field = method === 'tools/call' ? 'name' : 'uri';
+      const bodyValue = params[field];
+      if (typeof bodyValue !== 'string' || bodyValue.length === 0) {
+        return this.jsonRpcError(INVALID_PARAMS, `Invalid params: params.${field} is required and must be a non-empty string (Mcp-Name header was '${decodedMcpName}')`, id, 400, corsHeaders);
+      }
+      if (decodedMcpName !== bodyValue) {
+        return this.jsonRpcError(HEADER_MISMATCH, `Header mismatch: Mcp-Name header value '${decodedMcpName}' does not match body value '${bodyValue}'`, id, 400, corsHeaders);
+      }
+    }
+
+    // 25. Unknown RPC methods are 404 at the transport layer
+    if (!isSupportedMethod(method)) {
+      return this.jsonRpcError(
+        METHOD_NOT_FOUND,
+        `Method not found: ${method}. This server implements MCP ${MCP_PROTOCOL_VERSION} and supports: ${SUPPORTED_METHODS.join(', ')}.`,
+        id,
+        404,
+        corsHeaders
+      );
+    }
+
+    // 26. Build AuthContext from OAuth props. The bearer token itself was valid
+    //     (the OAuth provider checked it) but the credentials behind it are gone,
+    //     so the token can no longer be used: RFC 6750 `invalid_token`, with the
+    //     resource_metadata pointer every 401 must carry so the client can re-authorize.
+    let authContext: AuthContext;
+    try {
+      authContext = await buildAuthContext(typedCtx.props, typedEnv);
+    } catch {
+      return this.jsonRpcError(
+        UNAUTHORIZED,
+        'Unauthorized: stored credentials are missing or expired. Please re-authorize.',
+        id,
+        401,
+        corsHeaders,
+        undefined,
+        { 'WWW-Authenticate': this.bearerChallenge(request, 'invalid_token', 'Stored credentials are missing or expired') }
+      );
+    }
+
+    // 27. Dispatch. Everything the protocol layer returns - including application-level
+    //     -32602 (unknown tool, unknown resource, bad cursor) - is HTTP 200. The one
+    //     thing it throws is a scope failure, which is HTTP 403 with an
+    //     `insufficient_scope` challenge naming the scopes the operation needs
+    //     (authorization spec, "Runtime Insufficient Scope Errors").
+    const mcpServer = new MCPServer(authContext);
+    let response: MCPResponse;
+    try {
+      response = await mcpServer.handleRequest(body as unknown as MCPRequest);
+    } catch (error) {
+      if (error instanceof InsufficientScopeError) {
+        return this.jsonRpcError(
+          INSUFFICIENT_SCOPE,
+          error.message,
+          id,
+          403,
+          corsHeaders,
+          { requiredScopes: error.requiredScopes },
+          { 'WWW-Authenticate': this.bearerChallenge(request, 'insufficient_scope', error.message, error.requiredScopes) }
+        );
+      }
+      throw error;
+    }
+
+    return new Response(JSON.stringify(response), {
       headers: { 'Content-Type': 'application/json', ...corsHeaders }
     });
   }
 
   /**
-   * Quick check if MCP headers are present (used before JSON parsing)
+   * RFC 6750 §3 Bearer challenge. `resource_metadata` (RFC 9728 §5.1) uses the same
+   * path-suffixed document the OAuth provider names on its own 401s, so a client
+   * that discovered the authorization server from one challenge can reuse it from
+   * the other. Quotes and control characters are stripped from free-text parameters.
    */
-  private hasMcpHeaders(request: Request): boolean {
-    return request.headers.has('MCP-Protocol-Version');
+  private bearerChallenge(request: Request, error: string, description: string, scope?: string[]): string {
+    const url = new URL(request.url);
+    const resourceMetadata = `${url.origin}/.well-known/oauth-protected-resource${url.pathname}`;
+    const quote = (value: string) => `"${value.replace(/["\\\x00-\x1f\x7f]/g, '')}"`;
+    const parts = [
+      'realm="OAuth"',
+      `resource_metadata=${quote(resourceMetadata)}`,
+      `error="${error}"`,
+      `error_description=${quote(description)}`,
+    ];
+    if (scope && scope.length > 0) {
+      parts.push(`scope=${quote(scope.join(' '))}`);
+    }
+    return `Bearer ${parts.join(', ')}`;
+  }
+
+  /**
+   * Read a JSON-RPC id that is safe to echo. Returns undefined when the id is absent
+   * or is not a string/number - the `id` member is then omitted from the error response
+   * entirely (never sent as null).
+   */
+  private readId(body: Record<string, unknown>): string | number | undefined {
+    const raw = body.id;
+    return typeof raw === 'string' || typeof raw === 'number' ? raw : undefined;
+  }
+
+  /** Narrow a value to a plain (non-null, non-array) JSON object. */
+  private asObject(value: unknown): Record<string, unknown> | undefined {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  }
+
+  private jsonRpcError(
+    code: number,
+    message: string,
+    id: string | number | undefined,
+    status: number,
+    corsHeaders: Record<string, string> = {},
+    data?: unknown,
+    extraHeaders: Record<string, string> = {}
+  ): Response {
+    const body: MCPResponse = {
+      jsonrpc: '2.0',
+      error: { code, message, ...(data !== undefined && { data }) },
+      ...(id !== undefined && { id }),
+    };
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders, ...extraHeaders }
+    });
   }
 
   /**

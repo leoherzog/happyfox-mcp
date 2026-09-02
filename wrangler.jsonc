@@ -49,7 +49,6 @@
   }
 
   // Required secrets (set via: wrangler secret put <NAME>):
-  //   MCP_SESSION_SECRET - Secret key for session token signing (32+ characters recommended)
   //   CREDENTIAL_ENCRYPTION_KEY - 32-byte base64 key for AES-256-GCM credential encryption
   //                               Generate with: openssl rand -base64 32
   //

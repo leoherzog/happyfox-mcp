@@ -15,20 +15,6 @@ export interface StoredCredentials {
   expiresAt: number;  // Unix timestamp (seconds)
 }
 
-// OAuth Client Metadata (CIMD - Client ID Metadata Document)
-export interface ClientMetadata {
-  client_id: string;  // Must match the URL used to fetch this document
-  client_name: string;  // Display name (e.g., "Claude.ai")
-  client_uri?: string;  // Client homepage URL
-  logo_uri?: string;  // Client logo URL for consent page
-  redirect_uris: string[];  // Allowed callback URLs
-  scope?: string;  // Default scopes (space-separated)
-  grant_types?: string[];  // Supported grant types
-  response_types?: string[];  // Supported response types
-  token_endpoint_auth_method?: string;  // Auth method (e.g., "none" for public clients)
-  contacts?: string[];  // Security contact emails
-}
-
 // Consent page template data
 export interface ConsentPageData {
   clientName: string;
@@ -74,6 +60,3 @@ export const DEFAULT_SCOPES: HappyFoxScope[] = ['happyfox:read'];
 
 // Credential TTL in seconds (90 days)
 export const CREDENTIAL_TTL_SECONDS = 90 * 24 * 60 * 60;
-
-// CIMD fetch timeout in milliseconds
-export const CIMD_FETCH_TIMEOUT_MS = 5000;

@@ -85,9 +85,9 @@ export function renderHomePage(origin: string): string {
         </li>
       </ol>
       <p class="muted">
-        This server speaks MCP <code>${escapeHtml(MCP_PROTOCOL_VERSION)}</code> over Streamable HTTP
-        and authenticates with OAuth 2.0 + PKCE. There is nothing to install and no account to create
-        here &mdash; it is a thin bridge to the HappyFox API.
+        This server speaks MCP <code>${escapeHtml(MCP_PROTOCOL_VERSION)}</code> over stateless
+        Streamable HTTP and authenticates with OAuth 2.0 + PKCE. There is nothing to install and no
+        account to create here &mdash; it is a thin bridge to the HappyFox API.
       </p>
     </article>
 

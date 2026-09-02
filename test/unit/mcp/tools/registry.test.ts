@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ToolRegistry } from "../../../../src/mcp/tools/registry";
-import { ToolNotFoundError, ToolExecutionError, HappyFoxAuth, AuthContext } from "../../../../src/types";
+import { ToolNotFoundError, ToolExecutionError, InsufficientScopeError, HappyFoxAuth, AuthContext } from "../../../../src/types";
 import { HappyFoxAPIError } from "../../../../src/happyfox/client";
 
 // Mock global fetch to prevent network calls in unit tests
@@ -170,20 +170,23 @@ describe("ToolRegistry", () => {
       }
     });
 
-    it("throws ToolExecutionError for insufficient scopes", async () => {
+    it("throws InsufficientScopeError (not a tool execution error) for insufficient scopes", async () => {
       const limitedAuthContext: AuthContext = {
         ...testAuthContext,
         scopes: ["happyfox:read"] // Only read scope, not admin
       };
 
       await expect(registry.callToolWithAuth("happyfox_delete_ticket", { ticket_id: "123" }, limitedAuthContext))
-        .rejects.toThrow(ToolExecutionError);
+        .rejects.toThrow(InsufficientScopeError);
 
       try {
         await registry.callToolWithAuth("happyfox_delete_ticket", { ticket_id: "123" }, limitedAuthContext);
       } catch (error) {
-        expect(error).toBeInstanceOf(ToolExecutionError);
-        expect((error as ToolExecutionError).message).toContain("Insufficient permissions");
+        expect(error).toBeInstanceOf(InsufficientScopeError);
+        expect(error).not.toBeInstanceOf(ToolExecutionError);
+        expect((error as InsufficientScopeError).message).toContain("Insufficient scope");
+        // The transport puts these in the WWW-Authenticate scope="" parameter.
+        expect((error as InsufficientScopeError).requiredScopes).toEqual(["happyfox:admin"]);
       }
     });
   });

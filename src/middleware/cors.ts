@@ -1,5 +1,5 @@
 /**
- * CORS Middleware for MCP 2025-11-25 Streamable HTTP
+ * CORS Middleware for MCP 2026-07-28 Streamable HTTP
  * Handles origin validation and CORS headers
  */
 
@@ -16,7 +16,7 @@ export class CORSMiddleware {
   }
 
   /**
-   * Check if an origin is valid (for MCP 2025-11-25 403 enforcement)
+   * Check if an origin is valid (for MCP 2026-07-28 403 enforcement)
    * Returns true if origin is allowed or not present (same-origin/non-browser)
    */
   isOriginValid(origin: string | null): boolean {
@@ -29,7 +29,7 @@ export class CORSMiddleware {
 
   /**
    * Return 403 Forbidden response for invalid origins
-   * Per MCP 2025-11-25 spec: MUST return 403 for invalid Origin
+   * Per MCP 2026-07-28 spec: MUST return 403 for invalid Origin
    */
   handleInvalidOrigin(): Response {
     return new Response('Forbidden: Invalid Origin', {
@@ -40,19 +40,22 @@ export class CORSMiddleware {
 
   getCORSHeaders(origin?: string | null): Record<string, string> {
     const headers: Record<string, string> = {
-      // MCP 2025-11-25: Support GET, POST, DELETE, OPTIONS
-      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      // MCP 2025-11-25 headers + OAuth Authorization header
+      // MCP 2026-07-28: POST only. No GET (no SSE stream), no DELETE (no sessions).
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      // MCP 2026-07-28 standard request headers + OAuth Authorization header.
+      // Without Mcp-Method / Mcp-Name a browser client cannot send the mandatory headers.
       'Access-Control-Allow-Headers': [
         'Content-Type',
         'Accept',
         'Authorization',
-        'MCP-Session-Id',
         'MCP-Protocol-Version',
-        'Last-Event-ID'
+        'Mcp-Method',
+        'Mcp-Name'
       ].join(', '),
-      // Expose MCP headers to browser
-      'Access-Control-Expose-Headers': 'MCP-Session-Id, MCP-Protocol-Version',
+      // WWW-Authenticate is not CORS-safelisted; without exposing it a browser client
+      // cannot read the resource_metadata / insufficient_scope challenge on 401 and 403.
+      // (This server sets no MCP-* response headers, so none need exposing.)
+      'Access-Control-Expose-Headers': 'WWW-Authenticate',
       'Access-Control-Max-Age': '86400',
     };
 
@@ -67,7 +70,7 @@ export class CORSMiddleware {
   }
 
   handlePreflight(origin?: string | null): Response {
-    // Check if origin is valid first (per MCP 2025-11-25 spec)
+    // Check if origin is valid first (per MCP 2026-07-28 spec)
     if (origin && !this.isOriginAllowed(origin) && !this.allowedOrigins.includes('*')) {
       return this.handleInvalidOrigin();
     }

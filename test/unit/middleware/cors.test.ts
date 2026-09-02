@@ -23,16 +23,34 @@ describe("CORSMiddleware", () => {
   });
 
   describe("getCORSHeaders", () => {
-    it("returns MCP 2025-11-25 CORS headers", () => {
+    it("returns MCP 2026-07-28 CORS headers", () => {
       const middleware = new CORSMiddleware("*");
       const headers = middleware.getCORSHeaders("https://any.com");
 
-      expect(headers["Access-Control-Allow-Methods"]).toBe("GET, POST, DELETE, OPTIONS");
-      expect(headers["Access-Control-Allow-Headers"]).toContain("MCP-Session-Id");
+      // POST only: no SSE stream to GET, no session to DELETE.
+      expect(headers["Access-Control-Allow-Methods"]).toBe("POST, OPTIONS");
       expect(headers["Access-Control-Allow-Headers"]).toContain("MCP-Protocol-Version");
       expect(headers["Access-Control-Allow-Headers"]).toContain("Accept");
-      expect(headers["Access-Control-Allow-Headers"]).toContain("Last-Event-ID");
       expect(headers["Access-Control-Max-Age"]).toBe("86400");
+    });
+
+    it("allows the now-mandatory Mcp-Method and Mcp-Name headers", () => {
+      const middleware = new CORSMiddleware("*");
+      const headers = middleware.getCORSHeaders("https://any.com");
+
+      // Without these, a browser client cannot send the required headers at all.
+      expect(headers["Access-Control-Allow-Headers"]).toContain("Mcp-Method");
+      expect(headers["Access-Control-Allow-Headers"]).toContain("Mcp-Name");
+    });
+
+    it("no longer advertises the retired session headers", () => {
+      const middleware = new CORSMiddleware("*");
+      const headers = middleware.getCORSHeaders("https://any.com");
+
+      expect(headers["Access-Control-Allow-Headers"]).not.toContain("MCP-Session-Id");
+      expect(headers["Access-Control-Allow-Headers"]).not.toContain("Last-Event-ID");
+      expect(headers["Access-Control-Allow-Methods"]).not.toContain("GET");
+      expect(headers["Access-Control-Allow-Methods"]).not.toContain("DELETE");
     });
 
     it("includes OAuth Authorization header in allowed headers", () => {
@@ -42,12 +60,13 @@ describe("CORSMiddleware", () => {
       expect(headers["Access-Control-Allow-Headers"]).toContain("Authorization");
     });
 
-    it("exposes MCP headers to browser", () => {
+    it("exposes WWW-Authenticate so browser clients can read 401/403 challenges", () => {
       const middleware = new CORSMiddleware("*");
       const headers = middleware.getCORSHeaders("https://any.com");
 
-      expect(headers["Access-Control-Expose-Headers"]).toContain("MCP-Session-Id");
-      expect(headers["Access-Control-Expose-Headers"]).toContain("MCP-Protocol-Version");
+      // Not CORS-safelisted; without it a browser client cannot see resource_metadata
+      // or the insufficient_scope challenge. The server sets no MCP-* response headers.
+      expect(headers["Access-Control-Expose-Headers"]).toBe("WWW-Authenticate");
     });
 
     it("does not include Allow-Origin for disallowed origins", () => {
@@ -187,14 +206,15 @@ describe("CORSMiddleware", () => {
       expect(response.status).toBe(403);
     });
 
-    it("includes MCP 2025-11-25 CORS headers for allowed origin", () => {
+    it("includes MCP 2026-07-28 CORS headers for allowed origin", () => {
       const middleware = new CORSMiddleware("http://localhost:*");
       const response = middleware.handlePreflight("http://localhost:3000");
 
       expect(response.headers.get("Access-Control-Allow-Origin")).toBe("http://localhost:3000");
-      expect(response.headers.get("Access-Control-Allow-Methods")).toBe("GET, POST, DELETE, OPTIONS");
-      expect(response.headers.get("Access-Control-Allow-Headers")).toContain("MCP-Session-Id");
+      expect(response.headers.get("Access-Control-Allow-Methods")).toBe("POST, OPTIONS");
       expect(response.headers.get("Access-Control-Allow-Headers")).toContain("MCP-Protocol-Version");
+      expect(response.headers.get("Access-Control-Allow-Headers")).toContain("Mcp-Method");
+      expect(response.headers.get("Access-Control-Allow-Headers")).not.toContain("MCP-Session-Id");
     });
 
     it("returns null body for allowed origin", () => {
