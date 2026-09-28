@@ -34,19 +34,7 @@
       "binding": "OAUTH_KV",
       "id": "bca2a23940a44b1f8e23939b1f71e5c8"
     }
-  ],
-
-  // Environment-specific configurations (optional)
-  // The OAuth issuer and resource identifiers are derived from the request URL by the
-  // OAuth library; there is nothing to configure here.
-  "env": {
-    "production": {
-      "name": "happyfox-mcp-prod"
-    },
-    "development": {
-      "name": "happyfox-mcp-dev"
-    }
-  }
+  ]
 
   // Required secrets (set via: wrangler secret put <NAME>):
   //   CREDENTIAL_ENCRYPTION_KEY - 32-byte base64 key for AES-256-GCM credential encryption

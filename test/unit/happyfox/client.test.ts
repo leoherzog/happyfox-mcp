@@ -350,18 +350,16 @@ describe("HappyFoxClient", () => {
       const base = "https://testaccount.happyfox.com";
       const pool = fetchMock.get(base);
 
-      // First request fails with ECONNRESET
-      const connResetError = new Error("Connection reset");
-      (connResetError as any).code = "ECONNRESET";
+      const failure = new Error("Connection reset");
+      (failure as any).code = "ECONNRESET";
 
       pool
         .intercept({
           path: (actualPath: string) => actualPath.startsWith("/api/1.1/json/conn-reset/"),
           method: "GET"
         })
-        .replyWithError(connResetError);
+        .replyWithError(failure);
 
-      // Second request succeeds
       pool
         .intercept({
           path: (actualPath: string) => actualPath.startsWith("/api/1.1/json/conn-reset/"),
@@ -373,7 +371,6 @@ describe("HappyFoxClient", () => {
 
       const requestPromise = client.get("/conn-reset/");
 
-      // Advance timer for retry delay
       await vi.advanceTimersByTimeAsync(2000);
 
       const result = await requestPromise;
@@ -426,7 +423,7 @@ describe("HappyFoxClient", () => {
       const base = "https://testaccount.happyfox.com";
       const pool = fetchMock.get(base);
 
-      // Non-retryable error (no code, not TypeError with fetch)
+      // Non-retryable: no `.code`, and not a fetch TypeError
       const customError = new Error("Custom error");
 
       pool
@@ -458,15 +455,15 @@ describe("HappyFoxClient", () => {
       const base = "https://testaccount.happyfox.com";
       const pool = fetchMock.get(base);
 
-      const timeoutError = new Error("Connection timed out");
-      (timeoutError as any).code = "ETIMEDOUT";
+      const failure = new Error("Connection timed out");
+      (failure as any).code = "ETIMEDOUT";
 
       pool
         .intercept({
           path: (actualPath: string) => actualPath.startsWith("/api/1.1/json/timeout/"),
           method: "GET"
         })
-        .replyWithError(timeoutError);
+        .replyWithError(failure);
 
       pool
         .intercept({
@@ -490,15 +487,15 @@ describe("HappyFoxClient", () => {
       const base = "https://testaccount.happyfox.com";
       const pool = fetchMock.get(base);
 
-      const notFoundError = new Error("DNS lookup failed");
-      (notFoundError as any).code = "ENOTFOUND";
+      const failure = new Error("DNS lookup failed");
+      (failure as any).code = "ENOTFOUND";
 
       pool
         .intercept({
           path: (actualPath: string) => actualPath.startsWith("/api/1.1/json/dns-fail/"),
           method: "GET"
         })
-        .replyWithError(notFoundError);
+        .replyWithError(failure);
 
       pool
         .intercept({
@@ -522,15 +519,15 @@ describe("HappyFoxClient", () => {
       const base = "https://testaccount.happyfox.com";
       const pool = fetchMock.get(base);
 
-      const refusedError = new Error("Connection refused");
-      (refusedError as any).code = "ECONNREFUSED";
+      const failure = new Error("Connection refused");
+      (failure as any).code = "ECONNREFUSED";
 
       pool
         .intercept({
           path: (actualPath: string) => actualPath.startsWith("/api/1.1/json/conn-refused/"),
           method: "GET"
         })
-        .replyWithError(refusedError);
+        .replyWithError(failure);
 
       pool
         .intercept({

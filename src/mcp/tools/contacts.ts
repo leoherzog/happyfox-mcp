@@ -178,61 +178,47 @@ export class ContactTools {
     ];
   }
 
+  private endpoints(auth: HappyFoxAuth): ContactEndpoints {
+    return new ContactEndpoints(new HappyFoxClient(auth));
+  }
+
   async createContact(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new ContactEndpoints(client);
-    return await endpoints.createContact(args);
+    return await this.endpoints(auth).createContact(args);
   }
 
   async listContacts(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new ContactEndpoints(client);
-    return await endpoints.listContacts(args);
+    return await this.endpoints(auth).listContacts(args);
   }
 
   async getContact(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new ContactEndpoints(client);
-    return await endpoints.getContact(args.contact_id);
+    return await this.endpoints(auth).getContact(args.contact_id);
   }
 
   async updateContact(args: any, auth: HappyFoxAuth): Promise<any> {
     const { contact_id, ...updates } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new ContactEndpoints(client);
-    return await endpoints.updateContact(contact_id, updates);
+    return await this.endpoints(auth).updateContact(contact_id, updates);
   }
 
   async createContactGroup(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new ContactEndpoints(client);
-    return await endpoints.createContactGroup(args);
+    return await this.endpoints(auth).createContactGroup(args);
   }
 
   async getContactGroup(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new ContactEndpoints(client);
-    return await endpoints.getContactGroup(args.group_id);
+    return await this.endpoints(auth).getContactGroup(args.group_id);
   }
 
   async updateContactGroup(args: any, auth: HappyFoxAuth): Promise<any> {
     const { group_id, ...updates } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new ContactEndpoints(client);
-    return await endpoints.updateContactGroup(group_id, updates);
+    return await this.endpoints(auth).updateContactGroup(group_id, updates);
   }
 
   async addContactsToGroup(args: any, auth: HappyFoxAuth): Promise<any> {
     const { group_id, contact_ids } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new ContactEndpoints(client);
-    return await endpoints.addContactsToGroup(group_id, contact_ids);
+    return await this.endpoints(auth).addContactsToGroup(group_id, contact_ids);
   }
 
   async removeContactsFromGroup(args: any, auth: HappyFoxAuth): Promise<any> {
     const { group_id, contact_ids } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new ContactEndpoints(client);
-    return await endpoints.removeContactsFromGroup(group_id, contact_ids);
+    return await this.endpoints(auth).removeContactsFromGroup(group_id, contact_ids);
   }
 }

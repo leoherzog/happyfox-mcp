@@ -11,7 +11,6 @@ export interface StoredCredentials {
   staffId: number;
   staffName: string;
   staffEmail: string;
-  createdAt: number;  // Unix timestamp (seconds)
   expiresAt: number;  // Unix timestamp (seconds)
 }
 

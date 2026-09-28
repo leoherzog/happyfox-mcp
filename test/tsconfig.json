@@ -1,17 +1,6 @@
 {
   "extends": "../tsconfig.json",
-  "compilerOptions": {
-    "types": [
-      "@cloudflare/workers-types"
-    ],
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "noEmit": true
-  },
+  "exclude": [],
   "include": [
     "./**/*.ts",
     "../src/**/*.ts",

@@ -1,45 +1,50 @@
 import { HappyFoxClient } from '../client';
 
+interface TicketInput {
+  category: string;
+  subject: string;
+  text: string;
+  email: string;
+  name: string;
+  phone?: string;
+  priority?: string;
+  assignee?: string;
+  tags?: string[];
+  cc?: string[];
+  bcc?: string[];
+  custom_fields?: Record<string, any>;
+}
+
 export class TicketEndpoints {
   constructor(private client: HappyFoxClient) {}
 
-  async createTicket(data: {
-    category: string;
-    subject: string;
-    text: string;
-    email: string;
-    name: string;
-    phone?: string;
-    priority?: string;
-    assignee?: string;
-    tags?: string[];
-    cc?: string[];
-    bcc?: string[];
-    custom_fields?: Record<string, any>;
-  }): Promise<any> {
+  private formatTicket(ticket: TicketInput): any {
     const formData: any = {
-      category: data.category,
-      subject: data.subject,
-      text: data.text,
-      email: data.email,
-      name: data.name
+      category: ticket.category,
+      subject: ticket.subject,
+      text: ticket.text,
+      email: ticket.email,
+      name: ticket.name
     };
 
-    if (data.phone) formData.phone = data.phone;
-    if (data.priority) formData.priority = data.priority;
-    if (data.assignee) formData.assignee = data.assignee;
-    if (data.tags && data.tags.length > 0) formData.tags = data.tags.join(',');
-    if (data.cc && data.cc.length > 0) formData.cc = data.cc.join(',');
-    if (data.bcc && data.bcc.length > 0) formData.bcc = data.bcc.join(',');
+    if (ticket.phone) formData.phone = ticket.phone;
+    if (ticket.priority) formData.priority = ticket.priority;
+    if (ticket.assignee) formData.assignee = ticket.assignee;
+    if (ticket.tags && ticket.tags.length > 0) formData.tags = ticket.tags.join(',');
+    if (ticket.cc && ticket.cc.length > 0) formData.cc = ticket.cc.join(',');
+    if (ticket.bcc && ticket.bcc.length > 0) formData.bcc = ticket.bcc.join(',');
 
-    // Handle custom fields
-    if (data.custom_fields) {
-      Object.entries(data.custom_fields).forEach(([key, value]) => {
+    if (ticket.custom_fields) {
+      Object.entries(ticket.custom_fields).forEach(([key, value]) => {
         formData[key] = value;
       });
     }
 
-    return await this.client.post('/tickets/', formData);
+    return formData;
+  }
+
+  async createTicket(data: TicketInput): Promise<any> {
+    return await this.client.post('/tickets/', this.formatTicket(data));
   }
 
   async listTickets(params: {
@@ -166,7 +171,6 @@ export class TicketEndpoints {
   /**
    * Add a contact reply to a ticket (simulates customer response)
    * API: POST /ticket/<ticket_number>/user_reply/
-   * Per DOCUMENTATION.md:47
    */
   async addContactReply(ticketId: string, data: {
     text: string;
@@ -188,7 +192,6 @@ export class TicketEndpoints {
   /**
    * Subscribe an agent to a ticket
    * API: POST /ticket/<ticket_number>/subscribe/
-   * Per DOCUMENTATION.md:57
    */
   async subscribeToTicket(ticketId: string, staffId: number): Promise<any> {
     return await this.client.post(`/ticket/${ticketId}/subscribe/`, {
@@ -199,7 +202,6 @@ export class TicketEndpoints {
   /**
    * Unsubscribe an agent from a ticket
    * API: POST /ticket/<ticket_number>/unsubscribe/
-   * Per DOCUMENTATION.md:58
    */
   async unsubscribeFromTicket(ticketId: string, staffId: number): Promise<any> {
     return await this.client.post(`/ticket/${ticketId}/unsubscribe/`, {
@@ -210,22 +212,9 @@ export class TicketEndpoints {
   /**
    * Create multiple tickets in bulk
    * API: POST /tickets/ with array payload
-   * Per DOCUMENTATION.md:37-38 - Max 100 tickets per request
+   * The API caps a bulk request at 100 tickets.
    */
-  async createTicketsBulk(tickets: Array<{
-    category: string;
-    subject: string;
-    text: string;
-    email: string;
-    name: string;
-    phone?: string;
-    priority?: string;
-    assignee?: string;
-    tags?: string[];
-    cc?: string[];
-    bcc?: string[];
-    custom_fields?: Record<string, any>;
-  }>): Promise<any> {
+  async createTicketsBulk(tickets: TicketInput[]): Promise<any> {
     if (tickets.length > 100) {
       throw new Error('Bulk ticket creation limited to 100 tickets per request');
     }
@@ -234,31 +223,6 @@ export class TicketEndpoints {
       throw new Error('At least one ticket is required');
     }
 
-    const formattedTickets = tickets.map(ticket => {
-      const formData: any = {
-        category: ticket.category,
-        subject: ticket.subject,
-        text: ticket.text,
-        email: ticket.email,
-        name: ticket.name
-      };
-
-      if (ticket.phone) formData.phone = ticket.phone;
-      if (ticket.priority) formData.priority = ticket.priority;
-      if (ticket.assignee) formData.assignee = ticket.assignee;
-      if (ticket.tags && ticket.tags.length > 0) formData.tags = ticket.tags.join(',');
-      if (ticket.cc && ticket.cc.length > 0) formData.cc = ticket.cc.join(',');
-      if (ticket.bcc && ticket.bcc.length > 0) formData.bcc = ticket.bcc.join(',');
-
-      if (ticket.custom_fields) {
-        Object.entries(ticket.custom_fields).forEach(([key, value]) => {
-          formData[key] = value;
-        });
-      }
-
-      return formData;
-    });
-
-    return await this.client.post('/tickets/', formattedTickets);
+    return await this.client.post('/tickets/', tickets.map(ticket => this.formatTicket(ticket)));
   }
 }

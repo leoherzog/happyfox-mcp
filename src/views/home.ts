@@ -8,22 +8,11 @@
 
 import { MCP_PROTOCOL_VERSION } from '../types';
 import { AVAILABLE_SCOPES, SCOPE_DESCRIPTIONS } from '../oauth/types';
+import { escapeHtml } from './escape-html';
 
 /** Link to HappyFox's guide for generating an API key and auth code */
 const HAPPYFOX_API_KEY_DOCS =
   'https://support.happyfox.com/kb/article/476-create-api-key-auth-code-happyfox/';
-
-/**
- * Escape HTML special characters to prevent XSS
- */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
 
 /**
  * Render the home page

@@ -153,48 +153,38 @@ export class AssetTools {
     ];
   }
 
+  private endpoints(auth: HappyFoxAuth): AssetEndpoints {
+    return new AssetEndpoints(new HappyFoxClient(auth));
+  }
+
   async listAssets(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new AssetEndpoints(client);
-    return await endpoints.listAssets(args);
+    return await this.endpoints(auth).listAssets(args);
   }
 
   async getAsset(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new AssetEndpoints(client);
-    return await endpoints.getAsset(args.asset_id);
+    return await this.endpoints(auth).getAsset(args.asset_id);
   }
 
   async createAsset(args: any, auth: HappyFoxAuth): Promise<any> {
     const { asset_type_id, ...data } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new AssetEndpoints(client);
-    return await endpoints.createAsset(asset_type_id, data);
+    return await this.endpoints(auth).createAsset(asset_type_id, data);
   }
 
   async updateAsset(args: any, auth: HappyFoxAuth): Promise<any> {
     const { asset_id, ...updates } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new AssetEndpoints(client);
-    return await endpoints.updateAsset(asset_id, updates);
+    return await this.endpoints(auth).updateAsset(asset_id, updates);
   }
 
   async deleteAsset(args: any, auth: HappyFoxAuth): Promise<any> {
     const { asset_id, deleted_by } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new AssetEndpoints(client);
-    return await endpoints.deleteAsset(asset_id, deleted_by);
+    return await this.endpoints(auth).deleteAsset(asset_id, deleted_by);
   }
 
   async listAssetCustomFields(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new AssetEndpoints(client);
-    return await endpoints.listAssetCustomFields(args.asset_type_id);
+    return await this.endpoints(auth).listAssetCustomFields(args.asset_type_id);
   }
 
   async getAssetCustomField(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new AssetEndpoints(client);
-    return await endpoints.getAssetCustomField(args.custom_field_id);
+    return await this.endpoints(auth).getAssetCustomField(args.custom_field_id);
   }
 }

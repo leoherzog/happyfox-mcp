@@ -1,24 +1,12 @@
 import { HappyFoxClient } from '../client';
+import { formatPhones } from './phones';
 
 export class AssetEndpoints {
   constructor(private client: HappyFoxClient) {}
 
-  // Phone type mapping: API uses short codes (same as ContactEndpoints)
-  private mapPhoneType(type: string): string {
-    const typeMap: Record<string, string> = {
-      'mobile': 'mo',
-      'work': 'w',
-      'main': 'm',
-      'home': 'h',
-      'other': 'o'
-    };
-    return typeMap[type.toLowerCase()] || 'o';
-  }
-
   /**
    * List all assets with pagination and optional filtering
    * API: GET /assets/
-   * Per DOCUMENTATION.md:127-128
    */
   async listAssets(params: {
     page?: number;
@@ -40,7 +28,6 @@ export class AssetEndpoints {
   /**
    * Get a single asset by ID
    * API: GET /asset/<id>/
-   * Per DOCUMENTATION.md:129
    */
   async getAsset(assetId: number): Promise<any> {
     return await this.client.get(`/asset/${assetId}/`);
@@ -49,7 +36,6 @@ export class AssetEndpoints {
   /**
    * Create a new asset
    * API: POST /assets/?asset_type=<asset_type_id>
-   * Per DOCUMENTATION.md:132-133
    */
   async createAsset(assetTypeId: number, data: {
     name: string;
@@ -73,18 +59,13 @@ export class AssetEndpoints {
       formData.contact_ids = data.contact_ids;
     }
     if (data.contacts && data.contacts.length > 0) {
-      // Map phone types to API codes
       formData.contacts = data.contacts.map(contact => ({
         ...contact,
-        phones: contact.phones?.map((phone, index) => ({
-          type: this.mapPhoneType(phone.type),
-          number: phone.number,
-          is_primary: phone.is_primary ?? (index === 0)
-        }))
+        phones: contact.phones ? formatPhones(contact.phones) : undefined
       }));
     }
 
-    // Handle custom fields (format: a-cf-{id})
+    // Custom field keys use the a-cf-<id> format
     if (data.custom_fields) {
       Object.entries(data.custom_fields).forEach(([key, value]) => {
         formData[key] = value;
@@ -97,7 +78,6 @@ export class AssetEndpoints {
   /**
    * Update an existing asset
    * API: PUT /asset/<id>/
-   * Per DOCUMENTATION.md:134
    */
   async updateAsset(assetId: number, data: {
     name?: string;
@@ -118,18 +98,12 @@ export class AssetEndpoints {
     if (data.updated_by) formData.updated_by = data.updated_by;
     if (data.contact_ids) formData.contact_ids = data.contact_ids;
     if (data.contacts) {
-      // Map phone types to API codes
       formData.contacts = data.contacts.map(contact => ({
         ...contact,
-        phones: contact.phones?.map((phone, index) => ({
-          type: this.mapPhoneType(phone.type),
-          number: phone.number,
-          is_primary: phone.is_primary ?? (index === 0)
-        }))
+        phones: contact.phones ? formatPhones(contact.phones) : undefined
       }));
     }
 
-    // Handle custom fields
     if (data.custom_fields) {
       Object.entries(data.custom_fields).forEach(([key, value]) => {
         formData[key] = value;
@@ -142,7 +116,7 @@ export class AssetEndpoints {
   /**
    * Delete an asset
    * API: DELETE /asset/<id>/?deleted_by=<staff_id>
-   * Per DOCUMENTATION.md:135 - IMPORTANT: deleted_by is required
+   * deleted_by is required by the API.
    */
   async deleteAsset(assetId: number, deletedByStaffId: number): Promise<any> {
     return await this.client.delete(`/asset/${assetId}/`, { deleted_by: deletedByStaffId });
@@ -151,8 +125,7 @@ export class AssetEndpoints {
   /**
    * List asset custom fields for a specific asset type
    * API: GET /asset_custom_fields/?asset_type=<id>
-   * Per DOCUMENTATION.md:140 and HappyFox Asset Management API docs
-   * Note: asset_type is required per official API documentation
+   * asset_type is required by the API.
    */
   async listAssetCustomFields(assetTypeId: number): Promise<any> {
     return await this.client.get('/asset_custom_fields/', { asset_type: assetTypeId });
@@ -161,7 +134,6 @@ export class AssetEndpoints {
   /**
    * Get a single asset custom field by ID
    * API: GET /asset_custom_fields/<id>/
-   * Per DOCUMENTATION.md:141
    */
   async getAssetCustomField(customFieldId: number): Promise<any> {
     return await this.client.get(`/asset_custom_fields/${customFieldId}/`);

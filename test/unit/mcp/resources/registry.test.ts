@@ -16,8 +16,14 @@ describe('ResourceRegistry', () => {
   beforeEach(async () => {
     resetFetchMock();
     registry = new ResourceRegistry();
-    // Clear cache before each test
-    await referenceCache.invalidateAll(testAuth.accountName, testAuth.region);
+    // The Cache API is shared across tests in this file; drop what a prior test cached.
+    const cache = await caches.open('happyfox-reference-cache');
+    for (const resource of await registry.listResources()) {
+      const key = resource.uri.replace('happyfox://', '');
+      for (const region of ['us', 'eu']) {
+        await cache.delete(`https://cache.happyfox.local/${region}/${testAuth.accountName}/${key}`);
+      }
+    }
   });
 
   describe('constructor', () => {
@@ -192,9 +198,6 @@ describe('ResourceRegistry', () => {
         };
         const mockData = [{ id: 1, name: 'EU Category' }];
         mockHappyFoxGet('/categories/', mockData, 200, 'eu');
-
-        // Clear EU cache
-        await referenceCache.invalidateAll(euAuth.accountName, euAuth.region);
 
         const result = await registry.readResource('happyfox://categories', euAuth);
 

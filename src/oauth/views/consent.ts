@@ -6,18 +6,7 @@
  */
 
 import { ConsentPageData, SCOPE_DESCRIPTIONS, HappyFoxScope } from '../types';
-
-/**
- * Escape HTML special characters to prevent XSS
- */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
+import { escapeHtml } from '../../views/escape-html';
 
 /**
  * Render the OAuth consent page
@@ -26,7 +15,6 @@ function escapeHtml(str: string): string {
  * @returns HTML string
  */
 export function renderConsentPage(data: ConsentPageData): string {
-  // Build scope list HTML
   const scopeList = data.requestedScopes
     .map(scope => {
       const description = SCOPE_DESCRIPTIONS[scope as HappyFoxScope] || scope;
@@ -34,7 +22,6 @@ export function renderConsentPage(data: ConsentPageData): string {
     })
     .join('\n          ');
 
-  // Build error HTML if present
   const errorHtml = data.error
     ? `
       <article aria-invalid="true" style="background-color: var(--pico-del-color); color: white; padding: 1rem; margin-bottom: 1rem;">
@@ -42,7 +29,6 @@ export function renderConsentPage(data: ConsentPageData): string {
       </article>`
     : '';
 
-  // Build client header with optional logo
   const logoHtml = data.logoUri
     ? `<img src="${escapeHtml(data.logoUri)}" alt="${escapeHtml(data.clientName)}" class="client-logo" style="max-height: 48px; margin-bottom: 1rem;">`
     : '';
@@ -188,7 +174,6 @@ export function renderConsentPage(data: ConsentPageData): string {
   var authCodeInput = form.querySelector('input[name="auth_code"]');
   var emailHelper = document.getElementById('email-helper');
 
-  // Create status indicator
   var status = document.createElement('span');
   status.id = 'email-status';
   status.style.cssText = 'display:block;margin-top:0.25rem;font-size:0.875rem';
@@ -202,7 +187,6 @@ export function renderConsentPage(data: ConsentPageData): string {
     var regionEl = form.querySelector('input[name="region"]:checked');
     var region = regionEl ? regionEl.value : 'us';
 
-    // Clear if fields incomplete
     if (!email || !accountName || !apiKey || !authCode) {
       status.textContent = '';
       emailInput.removeAttribute('aria-invalid');

@@ -36,7 +36,7 @@ export const SUPPORTED_METHODS = [
   'resources/read',
 ] as const;
 
-export type SupportedMethod = (typeof SUPPORTED_METHODS)[number];
+type SupportedMethod = (typeof SUPPORTED_METHODS)[number];
 
 export function isSupportedMethod(method: string): method is SupportedMethod {
   return (SUPPORTED_METHODS as readonly string[]).includes(method);
@@ -48,9 +48,8 @@ export const METHODS_REQUIRING_MCP_NAME: readonly string[] = ['tools/call', 'res
 // ---------------------------------------------------------------------------
 // Error codes
 //
-// -32000..-32019 is the legacy sub-range: this server MUST NOT emit any code
-// from it. -32020..-32099 is reserved for the MCP spec: only the three codes
-// below may be used, and only with their specified meanings.
+// -32000..-32019 (legacy) MUST NOT be emitted. Of the spec-reserved
+// -32020..-32099 range, only the codes below are used.
 // ---------------------------------------------------------------------------
 
 export const PARSE_ERROR = -32700;
@@ -59,16 +58,14 @@ export const METHOD_NOT_FOUND = -32601;
 export const INVALID_PARAMS = -32602;
 export const INTERNAL_ERROR = -32603;
 
-// -32021 (MissingRequiredClientCapability) is deliberately absent: this server
-// requires no client capability, so it can never emit that code.
+// -32021 (MissingRequiredClientCapability) is absent: this server requires no
+// client capability, so it can never emit that code.
 export const HEADER_MISMATCH = -32020;
 export const UNSUPPORTED_PROTOCOL_VERSION = -32022;
 
-// Application-defined codes for OAuth-layer failures that the transport reports
-// with an HTTP 401/403 and a `WWW-Authenticate` challenge. The spec asks that
-// codes for purposes it does not define be allocated outside the JSON-RPC
-// reserved range (-32768..-32000); these mirror the HTTP status they always
-// accompany so the body and the status can never disagree.
+// OAuth-layer failures the transport reports as HTTP 401/403 with a
+// `WWW-Authenticate` challenge. Deliberately outside the JSON-RPC reserved
+// range, and equal to the HTTP status they always accompany, so body and status can never disagree.
 export const UNAUTHORIZED = 401;
 export const INSUFFICIENT_SCOPE = 403;
 
@@ -82,7 +79,7 @@ export const META_CLIENT_CAPABILITIES = 'io.modelcontextprotocol/clientCapabilit
 export const META_SERVER_INFO = 'io.modelcontextprotocol/serverInfo';
 
 // ---------------------------------------------------------------------------
-// Cache hints (milliseconds - note the unit trap: ReferenceCache stores seconds)
+// Cache hints, in milliseconds (ReferenceCache stores seconds - do not mix)
 // ---------------------------------------------------------------------------
 
 /** server/discover: identical for every caller. */
@@ -94,11 +91,9 @@ export const CACHE_TTL_MS_STANDARD = 900_000;
 // Server identity
 // ---------------------------------------------------------------------------
 
-export const SERVER_NAME = 'happyfox-mcp';
-
 /** Emitted in every result's `_meta` under META_SERVER_INFO. */
 export const SERVER_INFO: Implementation = {
-  name: SERVER_NAME,
+  name: 'happyfox-mcp',
   version: packageJson.version,
 };
 
@@ -113,22 +108,17 @@ export const SERVER_INSTRUCTIONS =
 // Identity / capability shapes
 // ---------------------------------------------------------------------------
 
-export interface Implementation {
+interface Implementation {
   name: string;
-  title?: string;
   version: string;
-  description?: string;
-  websiteUrl?: string;
 }
 
 /** This server requires none of these; the object is accepted opaquely. */
-export type ClientCapabilities = Record<string, unknown>;
+type ClientCapabilities = Record<string, unknown>;
 
-export interface ServerCapabilities {
+interface ServerCapabilities {
   tools?: Record<string, unknown>;
   resources?: Record<string, unknown>;
-  experimental?: Record<string, unknown>;
-  extensions?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +137,7 @@ export interface RequestMetaObject {
 }
 
 /** `params` is structurally REQUIRED on every request in this revision. */
-export interface RequestParams {
+interface RequestParams {
   _meta: RequestMetaObject;
   [key: string]: unknown;
 }
@@ -161,8 +151,8 @@ export interface ResultMetaObject {
   [key: string]: unknown;
 }
 
-/** Core protocol defines "complete" and "input_required"; this server emits only "complete". */
-export type ResultType = 'complete' | 'input_required' | (string & {});
+/** The core protocol also defines "input_required"; this server never emits it. */
+type ResultType = 'complete';
 
 export interface MCPResult {
   resultType: ResultType;
@@ -170,7 +160,7 @@ export interface MCPResult {
   [key: string]: unknown;
 }
 
-export type CacheScope = 'public' | 'private';
+type CacheScope = 'public' | 'private';
 
 export interface CacheableResult extends MCPResult {
   ttlMs: number;
@@ -197,14 +187,14 @@ export interface ReadResourceResult extends CacheableResult {
   contents: MCPResourceContent[];
 }
 
-export interface TextContent {
+interface TextContent {
   type: 'text';
   text: string;
   _meta?: Record<string, unknown>;
 }
 
 /** This server produces text blocks only. */
-export type ContentBlock = TextContent;
+type ContentBlock = TextContent;
 
 /** NOT a CacheableResult: tools/call results MUST NOT carry ttlMs/cacheScope. */
 export interface CallToolResult extends MCPResult {
@@ -225,10 +215,7 @@ export interface MCPRequest {
   id: string | number;
 }
 
-/**
- * `id` is omitted (never null) when the request id could not be read -
- * parse errors, malformed envelopes, batch rejection.
- */
+/** `id` is omitted (never null) when the request id could not be read. */
 export interface MCPResponse {
   jsonrpc: '2.0';
   result?: MCPResult;
@@ -262,9 +249,7 @@ export interface HappyFoxAuth {
 export interface AuthContext {
   credentials: HappyFoxAuth;
   staffId: number;
-  staffEmail: string;
   scopes: string[];
-  tokenId: string;
 }
 
 export interface MCPTool {
@@ -320,11 +305,8 @@ export class ResourceNotFoundError extends Error {
 }
 
 /**
- * Thrown when the caller's granted OAuth scopes do not cover the operation.
- *
- * This is NOT a JSON-RPC outcome: the protocol layer lets it propagate and the
- * transport answers HTTP 403 with a `WWW-Authenticate: Bearer error="insufficient_scope"`
- * challenge naming `requiredScopes`, so the client can step up its authorization.
+ * Granted OAuth scopes do not cover the operation. Not a JSON-RPC outcome: it
+ * propagates to the transport, which answers HTTP 403 + WWW-Authenticate.
  */
 export class InsufficientScopeError extends Error {
   public requiredScopes: string[];

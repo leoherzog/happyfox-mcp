@@ -11,7 +11,6 @@ export class ResourceRegistry {
   }
 
   private initializeResources() {
-    // Define available resources
     const resourceDefinitions: MCPResource[] = [
       {
         uri: 'happyfox://categories',
@@ -57,7 +56,6 @@ export class ResourceRegistry {
       }
     ];
 
-    // Register all resources
     for (const resource of resourceDefinitions) {
       this.resources.set(resource.uri, resource);
     }
@@ -73,14 +71,12 @@ export class ResourceRegistry {
       throw new ResourceNotFoundError(uri);
     }
 
-    // Extract cache key from URI (e.g., "happyfox://categories" -> "categories")
     const cacheKey = uri.replace('happyfox://', '');
 
-    // Try to get from cache first (include region to prevent cross-pollution)
+    // Region is part of the cache key to prevent US/EU cross-pollution.
     let data = await referenceCache.get<any>(auth.accountName, auth.region, cacheKey);
 
     if (!data) {
-      // Cache miss - fetch from HappyFox API
       const client = new HappyFoxClient(auth);
 
       switch (uri) {
@@ -116,7 +112,6 @@ export class ResourceRegistry {
           throw new ResourceNotFoundError(uri);
       }
 
-      // Store in cache for next time (include region)
       await referenceCache.set(auth.accountName, auth.region, cacheKey, data);
     }
 

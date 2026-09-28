@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { CredentialStore, createCredentialStore } from '../../../../src/oauth/services/credential-store';
+import { CredentialStore, decodeEncryptionKey } from '../../../../src/oauth/services/credential-store';
 import { StoredCredentials, CREDENTIAL_TTL_SECONDS } from '../../../../src/oauth/types';
 import { env } from 'cloudflare:workers';
 
@@ -17,7 +17,6 @@ function createTestCredentials(overrides: Partial<StoredCredentials> = {}): Stor
     staffId: 1,
     staffName: 'Test User',
     staffEmail: 'test@example.com',
-    createdAt: now,
     expiresAt: now + CREDENTIAL_TTL_SECONDS,
     ...overrides,
   };
@@ -163,45 +162,6 @@ describe('CredentialStore', () => {
     });
   });
 
-  describe('renewTTL', () => {
-    it('extends TTL for existing credentials', async () => {
-      const now = Math.floor(Date.now() / 1000);
-      const credentials = createTestCredentials({
-        expiresAt: now + 1000, // 1000 seconds remaining
-      });
-      const tokenId = 'renew-token';
-
-      await store.store(tokenId, credentials);
-
-      const result = await store.renewTTL(tokenId);
-      expect(result).toBe(true);
-
-      const retrieved = await store.retrieve(tokenId);
-      expect(retrieved?.expiresAt).toBeGreaterThan(now + 1000);
-      expect(retrieved?.expiresAt).toBe(now + CREDENTIAL_TTL_SECONDS);
-    });
-
-    it('returns false for non-existent credentials', async () => {
-      const result = await store.renewTTL('non-existent-token');
-      expect(result).toBe(false);
-    });
-
-    it('returns false for expired credentials', async () => {
-      const now = Math.floor(Date.now() / 1000);
-      const credentials = createTestCredentials({
-        expiresAt: now - 100, // Already expired
-      });
-      const tokenId = 'expired-renew-token';
-
-      // Store directly bypassing expiration check
-      const encrypted = await (store as any).encrypt(JSON.stringify(credentials));
-      await kv.put(`cred:${tokenId}`, encrypted, { expirationTtl: 3600 });
-
-      const result = await store.renewTTL(tokenId);
-      expect(result).toBe(false);
-    });
-  });
-
   describe('key import', () => {
     it('caches key after first import', async () => {
       const credentials = createTestCredentials();
@@ -222,7 +182,7 @@ describe('CredentialStore', () => {
       const credentials = createTestCredentials();
 
       await expect(invalidStore.store('test', credentials)).rejects.toThrow(
-        'CREDENTIAL_ENCRYPTION_KEY must be valid base64'
+        'CREDENTIAL_ENCRYPTION_KEY must be valid base64 for exactly 32 bytes'
       );
     });
 
@@ -233,7 +193,7 @@ describe('CredentialStore', () => {
       const credentials = createTestCredentials();
 
       await expect(shortKeyStore.store('test', credentials)).rejects.toThrow(
-        'Encryption key must be exactly 32 bytes'
+        'CREDENTIAL_ENCRYPTION_KEY must be valid base64 for exactly 32 bytes'
       );
     });
 
@@ -284,10 +244,15 @@ describe('CredentialStore', () => {
   });
 });
 
-describe('createCredentialStore', () => {
-  it('creates a CredentialStore instance', () => {
-    const kv = env.OAUTH_KV;
-    const store = createCredentialStore(kv, TEST_ENCRYPTION_KEY);
-    expect(store).toBeInstanceOf(CredentialStore);
+describe('decodeEncryptionKey', () => {
+  it('returns the 32 raw bytes for a valid key', () => {
+    expect(decodeEncryptionKey(TEST_ENCRYPTION_KEY)?.length).toBe(32);
+  });
+
+  it('returns null for a missing, non-base64, or wrong-length key', () => {
+    expect(decodeEncryptionKey(undefined)).toBeNull();
+    expect(decodeEncryptionKey('')).toBeNull();
+    expect(decodeEncryptionKey('not-valid-base64!!!')).toBeNull();
+    expect(decodeEncryptionKey(btoa('short-16-byte-key'))).toBeNull();
   });
 });

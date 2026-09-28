@@ -49,9 +49,7 @@ describe("MCPServer", () => {
       region: "us"
     },
     staffId: 1,
-    staffEmail: "test@example.com",
-    scopes: ["happyfox:read", "happyfox:write"],
-    tokenId: "test-token-id"
+    scopes: ["happyfox:read", "happyfox:write"]
   };
 
   let server: MCPServer;

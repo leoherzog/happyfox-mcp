@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import { env } from "cloudflare:workers";
 import { McpApiHandler } from "../../../src/index";
-import { createCredentialStore } from "../../../src/oauth/services/credential-store";
+import { CredentialStore } from "../../../src/oauth/services/credential-store";
 import { CREDENTIAL_TTL_SECONDS } from "../../../src/oauth/types";
 import { fetchMock } from "../../helpers/fetch-mock";
 import {
@@ -28,10 +28,6 @@ const TOKEN_ID = "test-token-id";
 const testCtx = {
   props: {
     tokenId: TOKEN_ID,
-    staffId: 1,
-    staffEmail: "test@example.com",
-    accountName: "testaccount",
-    region: "us" as const,
     scopes: ["happyfox:read", "happyfox:write"],
   },
   waitUntil() {},
@@ -64,7 +60,7 @@ async function jsonBody(response: Response): Promise<Record<string, any>> {
 
 describe("McpApiHandler - MCP 2026-07-28 transport", () => {
   beforeAll(async () => {
-    const store = createCredentialStore(env.OAUTH_KV, env.CREDENTIAL_ENCRYPTION_KEY);
+    const store = new CredentialStore(env.OAUTH_KV, env.CREDENTIAL_ENCRYPTION_KEY);
     const now = Math.floor(Date.now() / 1000);
     await store.store(TOKEN_ID, {
       apiKey: "test-api-key",
@@ -74,7 +70,6 @@ describe("McpApiHandler - MCP 2026-07-28 transport", () => {
       staffId: 1,
       staffName: "Test Staff",
       staffEmail: "test@example.com",
-      createdAt: now,
       expiresAt: now + CREDENTIAL_TTL_SECONDS,
     });
 

@@ -16,98 +16,52 @@ export function resetFetchMock() {
 
 export { fetchMock };
 
-export function mockHappyFoxGet(
+/** Pool for an origin, pre-registered to intercept `path` for `method`. */
+function interceptPool(path: string, method: string, region: "us" | "eu") {
+  const pool = fetchMock.get(getHappyFoxBase(region));
+  const interceptor = pool.intercept({
+    // Use a function matcher to handle query parameters
+    path: (actualPath: string) => actualPath.startsWith(`/api/1.1/json${path}`),
+    method
+  });
+  return { pool, interceptor };
+}
+
+function mockHappyFox(
+  method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   response: unknown,
   status = 200,
   region: "us" | "eu" = "us"
 ) {
-  const base = getHappyFoxBase(region);
-  const pool = fetchMock.get(base);
-  // Use a function matcher to handle query parameters
-  pool
-    .intercept({
-      path: (actualPath: string) => actualPath.startsWith(`/api/1.1/json${path}`),
-      method: "GET"
-    })
-    .reply(status, JSON.stringify(response), {
-      headers: { "Content-Type": "application/json" }
-    });
+  const { pool, interceptor } = interceptPool(path, method, region);
+  interceptor.reply(status, JSON.stringify(response), {
+    headers: { "Content-Type": "application/json" }
+  });
   return pool;
 }
 
-export function mockHappyFoxPost(
-  path: string,
-  response: unknown,
-  status = 200,
-  region: "us" | "eu" = "us"
-) {
-  const base = getHappyFoxBase(region);
-  const pool = fetchMock.get(base);
-  pool
-    .intercept({
-      path: (actualPath: string) => actualPath.startsWith(`/api/1.1/json${path}`),
-      method: "POST"
-    })
-    .reply(status, JSON.stringify(response), {
-      headers: { "Content-Type": "application/json" }
-    });
-  return pool;
-}
+export const mockHappyFoxGet = (path: string, response: unknown, status = 200, region: "us" | "eu" = "us") =>
+  mockHappyFox("GET", path, response, status, region);
 
-export function mockHappyFoxPut(
-  path: string,
-  response: unknown,
-  status = 200,
-  region: "us" | "eu" = "us"
-) {
-  const base = getHappyFoxBase(region);
-  const pool = fetchMock.get(base);
-  pool
-    .intercept({
-      path: (actualPath: string) => actualPath.startsWith(`/api/1.1/json${path}`),
-      method: "PUT"
-    })
-    .reply(status, JSON.stringify(response), {
-      headers: { "Content-Type": "application/json" }
-    });
-  return pool;
-}
+export const mockHappyFoxPost = (path: string, response: unknown, status = 200, region: "us" | "eu" = "us") =>
+  mockHappyFox("POST", path, response, status, region);
 
-export function mockHappyFoxDelete(
-  path: string,
-  response: unknown,
-  status = 200,
-  region: "us" | "eu" = "us"
-) {
-  const base = getHappyFoxBase(region);
-  const pool = fetchMock.get(base);
-  pool
-    .intercept({
-      path: (actualPath: string) => actualPath.startsWith(`/api/1.1/json${path}`),
-      method: "DELETE"
-    })
-    .reply(status, JSON.stringify(response), {
-      headers: { "Content-Type": "application/json" }
-    });
-  return pool;
-}
+export const mockHappyFoxPut = (path: string, response: unknown, status = 200, region: "us" | "eu" = "us") =>
+  mockHappyFox("PUT", path, response, status, region);
+
+export const mockHappyFoxDelete = (path: string, response: unknown, status = 200, region: "us" | "eu" = "us") =>
+  mockHappyFox("DELETE", path, response, status, region);
 
 export function mockRateLimitResponse(
   path: string,
   method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
   region: "us" | "eu" = "us"
 ) {
-  const base = getHappyFoxBase(region);
-  const pool = fetchMock.get(base);
-  pool
-    .intercept({
-      path: (actualPath: string) => actualPath.startsWith(`/api/1.1/json${path}`),
-      method
-    })
-    .reply(429, "Rate limit exceeded", {
-      headers: { "Content-Type": "text/plain" }
-    });
+  const { pool, interceptor } = interceptPool(path, method, region);
+  interceptor.reply(429, "Rate limit exceeded", {
+    headers: { "Content-Type": "text/plain" }
+  });
   return pool;
 }
 
@@ -116,13 +70,7 @@ export function mockNetworkError(
   method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
   region: "us" | "eu" = "us"
 ) {
-  const base = getHappyFoxBase(region);
-  const pool = fetchMock.get(base);
-  pool
-    .intercept({
-      path: (actualPath: string) => actualPath.startsWith(`/api/1.1/json${path}`),
-      method
-    })
-    .replyWithError(new Error("Network error"));
+  const { pool, interceptor } = interceptPool(path, method, region);
+  interceptor.replyWithError(new Error("Network error"));
   return pool;
 }

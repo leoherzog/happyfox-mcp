@@ -10,7 +10,6 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:watch": "vitest --watch",
-    "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",

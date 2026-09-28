@@ -28,17 +28,10 @@ import { ToolRegistry } from './tools/registry';
 import { ResourceRegistry } from './resources/registry';
 
 /**
- * MCP 2026-07-28 protocol layer.
+ * MCP 2026-07-28 protocol layer: stateless, no handshake, no sessions.
  *
- * Stateless: there is no initialize handshake, no session, and no notification
- * handling. The transport (src/index.ts) validates headers and `params._meta`
- * and rejects unknown methods with HTTP 404 before dispatching here, so every
- * request reaching handleRequest has a readable string/number id.
- *
- * handleRequest resolves to a JSON-RPC response for every outcome but one:
- * InsufficientScopeError is rethrown, because an OAuth scope failure is an HTTP
- * 403 + WWW-Authenticate challenge (authorization spec, "Runtime Insufficient
- * Scope Errors"), not a JSON-RPC result, and only the transport can build that.
+ * The transport (src/index.ts) validates headers and `params._meta` and 404s
+ * unknown methods first, so every request here has a readable string/number id.
  */
 export class MCPServer {
   private authContext: AuthContext;
@@ -69,9 +62,9 @@ export class MCPServer {
         case 'resources/read':
           return await this.handleResourceRead(request);
 
+        // Unreachable over HTTP (the transport 404s first); defense in depth
+        // for direct callers.
         default:
-          // Unreachable over HTTP: the transport 404s unknown methods first.
-          // Kept as defense in depth for direct callers.
           throw this.createError(METHOD_NOT_FOUND, `Method not found: ${request.method}`);
       }
     } catch (error) {
@@ -80,8 +73,7 @@ export class MCPServer {
         throw error;
       }
 
-      // The id is always readable here - the transport rejects malformed
-      // envelopes - so error responses always echo it, and never send null.
+      // id is always readable here - the transport already rejected malformed envelopes.
       if (error && typeof error === 'object' && 'code' in error && 'message' in error) {
         return {
           jsonrpc: '2.0',
@@ -102,14 +94,9 @@ export class MCPServer {
   }
 
   /**
-   * Build a successful response. Every result carries `resultType: "complete"`
-   * and `_meta[io.modelcontextprotocol/serverInfo]`. Caller-supplied meta (e.g.
-   * statusCode/errorCode on tool execution errors) is merged first so serverInfo
-   * can never be clobbered and the caller's keys are never lost.
-   *
-   * The type parameter names the spec result shape being built, so the compiler
-   * enforces its required fields (`ttlMs`/`cacheScope` on the cacheable ones,
-   * `content` on tools/call) instead of leaving them to tests alone.
+   * Build a successful response. Caller-supplied meta is merged first so
+   * serverInfo can never be clobbered. `T` names the spec result shape so the
+   * compiler enforces its required fields (ttlMs/cacheScope, content).
    */
   private success<T extends MCPResult>(
     request: MCPRequest,
@@ -127,16 +114,34 @@ export class MCPServer {
     };
   }
 
+  /** Cursor is a decimal start index; pages are 50 items. */
+  private paginate<T>(items: T[], cursor: string | undefined): { page: T[]; nextCursor?: string } {
+    let startIndex = 0;
+    if (cursor !== undefined) {
+      const parsed = parseInt(cursor, 10);
+      if (isNaN(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+        throw this.createError(INVALID_PARAMS, 'Invalid cursor: must be a non-negative integer');
+      }
+      startIndex = parsed;
+    }
+
+    const endIndex = Math.min(startIndex + 50, items.length);
+    return {
+      page: items.slice(startIndex, endIndex),
+      ...(endIndex < items.length && { nextCursor: String(endIndex) })
+    };
+  }
+
   /**
-   * server/discover - MANDATORY in 2026-07-28. Requires no OAuth scope: its
-   * bytes are identical for every caller, hence cacheScope "public".
+   * server/discover requires no OAuth scope: its bytes are identical for every
+   * caller, hence cacheScope "public".
    */
   private handleDiscover(request: MCPRequest): MCPResponse {
     return this.success<DiscoverResult>(request, {
       supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
       capabilities: {
-        // Bare empty objects: no listChanged (no subscriptions/listen stream to
-        // deliver notifications on), no subscribe, no completions/prompts/logging.
+        // Bare empty objects: no listChanged (nothing delivers notifications),
+        // no subscribe, no completions/prompts/logging.
         tools: {},
         resources: {}
       },
@@ -147,35 +152,19 @@ export class MCPServer {
   }
 
   private async handleToolsList(request: MCPRequest): Promise<MCPResponse> {
-    const cursor = request.params.cursor as string | undefined;
-
-    // Validate cursor if provided
-    let startIndex = 0;
-    if (cursor !== undefined) {
-      const parsed = parseInt(cursor, 10);
-      if (isNaN(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
-        throw this.createError(INVALID_PARAMS, 'Invalid cursor: must be a non-negative integer');
-      }
-      startIndex = parsed;
-    }
-
-    // Filter tools by granted scopes, then sort by name so the list is
-    // deterministic across requests (byte comparison - localeCompare is
-    // locale-dependent and would not be stable).
+    // Byte comparison, not localeCompare: the order must be stable across
+    // requests regardless of locale.
     const allTools = (await this.toolRegistry.listTools(this.authContext.scopes))
       .slice()
       .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
-    // Simple pagination: decode cursor as start index, page size of 50
-    const pageSize = 50;
-    const endIndex = Math.min(startIndex + pageSize, allTools.length);
-    const pagedTools = allTools.slice(startIndex, endIndex);
-
-    // Include nextCursor if there are more items
-    const nextCursor = endIndex < allTools.length ? String(endIndex) : undefined;
+    const { page, nextCursor } = this.paginate(
+      allTools,
+      request.params.cursor as string | undefined
+    );
 
     return this.success<ListToolsResult>(request, {
-      tools: pagedTools,
+      tools: page,
       ...(nextCursor !== undefined && { nextCursor }),
       // Scope-filtered per caller, so the cache scope is private on every page.
       ttlMs: CACHE_TTL_MS_STANDARD,
@@ -191,7 +180,6 @@ export class MCPServer {
     }
 
     try {
-      // Use OAuth-aware tool call with scope enforcement and staff_id injection
       const result = await this.toolRegistry.callToolWithAuth(
         name as string,
         args || {},
@@ -208,19 +196,16 @@ export class MCPServer {
         ]
       });
     } catch (error) {
-      // A scope failure is neither a protocol error nor a tool execution error:
-      // it propagates to the transport, which answers 403 + WWW-Authenticate.
+      // A scope failure is the transport's to report (HTTP 403 + challenge).
       if (error instanceof InsufficientScopeError) {
         throw error;
       }
 
-      // ToolNotFoundError is a protocol error - throw to be handled as JSON-RPC error
       if (error instanceof ToolNotFoundError) {
         throw this.createError(INVALID_PARAMS, error.message);
       }
 
-      // ToolExecutionError returns as tool result with isError: true. This is a
-      // successful JSON-RPC result, so it still carries resultType: "complete".
+      // A tool execution error is still a successful JSON-RPC result.
       if (error instanceof ToolExecutionError) {
         return this.success<CallToolResult>(
           request,
@@ -233,8 +218,7 @@ export class MCPServer {
             ],
             isError: true
           },
-          // Include API error details if available. Unprefixed _meta keys are
-          // legal in 2026-07-28 (the prefix segment is optional).
+          // Unprefixed _meta keys are legal in 2026-07-28.
           {
             ...(error.statusCode !== undefined && { statusCode: error.statusCode }),
             ...(error.errorCode !== undefined && { errorCode: error.errorCode })
@@ -242,7 +226,6 @@ export class MCPServer {
         );
       }
 
-      // Unknown errors - return as tool error with isError: true
       return this.success<CallToolResult>(request, {
         content: [
           {
@@ -256,36 +239,19 @@ export class MCPServer {
   }
 
   private async handleResourcesList(request: MCPRequest): Promise<MCPResponse> {
-    const cursor = request.params.cursor as string | undefined;
-
-    // Validate cursor if provided
-    let startIndex = 0;
-    if (cursor !== undefined) {
-      const parsed = parseInt(cursor, 10);
-      if (isNaN(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
-        throw this.createError(INVALID_PARAMS, 'Invalid cursor: must be a non-negative integer');
-      }
-      startIndex = parsed;
-    }
-
-    // A server declaring the `resources` capability MUST answer resources/list
-    // with the set available to this caller - which MAY be empty and MAY vary by
-    // the authorization presented. A caller without happyfox:read sees nothing,
-    // expressed as an empty array, never as an error (mirrors handleToolsList).
+    // A caller without happyfox:read sees an empty list, never an error: the
+    // set MAY vary by the authorization presented (mirrors handleToolsList).
     const allResources = this.authContext.scopes.includes('happyfox:read')
       ? await this.resourceRegistry.listResources()
       : [];
 
-    // Simple pagination: decode cursor as start index, page size of 50
-    const pageSize = 50;
-    const endIndex = Math.min(startIndex + pageSize, allResources.length);
-    const pagedResources = allResources.slice(startIndex, endIndex);
-
-    // Include nextCursor if there are more items
-    const nextCursor = endIndex < allResources.length ? String(endIndex) : undefined;
+    const { page, nextCursor } = this.paginate(
+      allResources,
+      request.params.cursor as string | undefined
+    );
 
     return this.success<ListResourcesResult>(request, {
-      resources: pagedResources,
+      resources: page,
       ...(nextCursor !== undefined && { nextCursor }),
       // Per-HappyFox-account data: private on every page.
       ttlMs: CACHE_TTL_MS_STANDARD,
@@ -300,9 +266,8 @@ export class MCPServer {
       throw this.createError(INVALID_PARAMS, 'Missing required parameter: uri');
     }
 
-    // A scope denial is not a resources-feature error (-32602 is for a resource
-    // that does not exist). It propagates to the transport as HTTP 403 with a
-    // WWW-Authenticate insufficient_scope challenge naming the missing scope.
+    // A scope denial is not a resources-feature error (-32602 means the
+    // resource does not exist); the transport answers 403 + challenge.
     if (!this.authContext.scopes.includes('happyfox:read')) {
       throw new InsufficientScopeError(
         'Insufficient scope. Resource access requires happyfox:read.',

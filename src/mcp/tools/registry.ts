@@ -4,7 +4,6 @@ import { TicketTools } from './tickets';
 import { ContactTools } from './contacts';
 import { AssetTools } from './assets';
 import {
-  hasRequiredScopes,
   filterToolsByScopes,
   injectStaffId,
   getRequiredScopes,
@@ -18,15 +17,9 @@ export class ToolRegistry {
     this.tools = new Map();
     this.toolHandlers = new Map();
 
-    // Initialize tool modules
-    const ticketTools = new TicketTools();
-    const contactTools = new ContactTools();
-    const assetTools = new AssetTools();
-
-    // Register all tools
-    this.registerToolModule(ticketTools);
-    this.registerToolModule(contactTools);
-    this.registerToolModule(assetTools);
+    this.registerToolModule(new TicketTools());
+    this.registerToolModule(new ContactTools());
+    this.registerToolModule(new AssetTools());
   }
 
   private registerToolModule(module: any) {
@@ -37,39 +30,28 @@ export class ToolRegistry {
     }
   }
 
-  /**
-   * List all tools, optionally filtered by granted scopes
-   */
-  async listTools(scopes?: string[]): Promise<MCPTool[]> {
-    const allTools = Array.from(this.tools.values());
-
-    if (scopes && scopes.length > 0) {
-      return filterToolsByScopes(allTools, scopes);
-    }
-
-    return allTools;
+  /** Only the tools the granted scopes permit; an empty scope list yields none. */
+  async listTools(scopes: string[]): Promise<MCPTool[]> {
+    return filterToolsByScopes(Array.from(this.tools.values()), scopes);
   }
 
-  /**
-   * Call a tool with OAuth context (scope enforcement and staff_id injection)
-   */
+  /** Call a tool with scope enforcement and staff_id injection. */
   async callToolWithAuth(name: string, args: any, authContext: AuthContext): Promise<any> {
     const handler = this.toolHandlers.get(name);
     if (!handler) {
       throw new ToolNotFoundError(name);
     }
 
-    // Enforce scope permissions. Not a tool execution error: the transport turns
-    // this into HTTP 403 + WWW-Authenticate so the client can step up.
-    if (!hasRequiredScopes(authContext.scopes, name)) {
-      const requiredScopes = getRequiredScopes(name) ?? [];
+    // Not a tool execution error: the transport turns this into HTTP 403 +
+    // WWW-Authenticate so the client can step up.
+    const requiredScopes = getRequiredScopes(name) ?? [];
+    if (!requiredScopes.some(scope => authContext.scopes.includes(scope))) {
       throw new InsufficientScopeError(
         `Insufficient scope. Tool '${name}' requires scope: ${requiredScopes.join(' or ')}`,
         requiredScopes
       );
     }
 
-    // Auto-inject staff_id if not provided
     const enrichedArgs = injectStaffId(name, args, authContext.staffId);
 
     try {

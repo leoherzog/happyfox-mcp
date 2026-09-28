@@ -1,5 +1,7 @@
 # HappyFox API Documentation
 
+This file is a reference transcription of HappyFox's public API documentation, not a description of this adapter: only the Tickets, Contacts/Contact Groups, Assets, and General/Helper endpoints below are implemented here. Reports and Knowledge Base are listed for reference only.
+
 ## General Information
 
 **Base URL:**

@@ -245,51 +245,41 @@ export class TicketTools {
     ];
   }
 
+  private endpoints(auth: HappyFoxAuth): TicketEndpoints {
+    return new TicketEndpoints(new HappyFoxClient(auth));
+  }
+
   async createTicket(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.createTicket(args);
+    return await this.endpoints(auth).createTicket(args);
   }
 
   async listTickets(args: any, auth: HappyFoxAuth): Promise<any> {
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.listTickets(args);
+    return await this.endpoints(auth).listTickets(args);
   }
 
   async getTicket(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, show_cf_changes } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.getTicket(ticket_id, { show_cf_changes });
+    return await this.endpoints(auth).getTicket(ticket_id, { show_cf_changes });
   }
 
   async updateTicketTags(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, staff_id, add, remove } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.updateTags(ticket_id, { add, remove, staff_id });
+    return await this.endpoints(auth).updateTags(ticket_id, { add, remove, staff_id });
   }
 
   async updateTicketCustomFields(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, staff, custom_fields } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.updateCustomFields(ticket_id, custom_fields, staff);
+    return await this.endpoints(auth).updateCustomFields(ticket_id, custom_fields, staff);
   }
 
   async moveTicketCategory(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, staff_id, target_category_id } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.moveCategory(ticket_id, staff_id, target_category_id);
+    return await this.endpoints(auth).moveCategory(ticket_id, staff_id, target_category_id);
   }
 
   async addStaffReply(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, staff_id, text, cc, bcc, status, priority, assignee } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.addStaffReply(ticket_id, {
+    return await this.endpoints(auth).addStaffReply(ticket_id, {
       text,
       staff_id,
       cc,
@@ -302,9 +292,7 @@ export class TicketTools {
 
   async addPrivateNote(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, staff_id, text, status, priority } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.addPrivateNote(ticket_id, {
+    return await this.endpoints(auth).addPrivateNote(ticket_id, {
       text,
       staff_id,
       status,
@@ -314,9 +302,7 @@ export class TicketTools {
 
   async forwardTicket(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, staff_id, to, subject, message } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.forwardTicket(ticket_id, {
+    return await this.endpoints(auth).forwardTicket(ticket_id, {
       to,
       subject,
       staff_id,
@@ -326,36 +312,26 @@ export class TicketTools {
 
   async deleteTicket(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, staff_id } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.deleteTicket(ticket_id, staff_id);
+    return await this.endpoints(auth).deleteTicket(ticket_id, staff_id);
   }
 
   async addContactReply(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, user, text, cc, bcc } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.addContactReply(ticket_id, { text, user, cc, bcc });
+    return await this.endpoints(auth).addContactReply(ticket_id, { text, user, cc, bcc });
   }
 
   async subscribeToTicket(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, staff_id } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.subscribeToTicket(ticket_id, staff_id);
+    return await this.endpoints(auth).subscribeToTicket(ticket_id, staff_id);
   }
 
   async unsubscribeFromTicket(args: any, auth: HappyFoxAuth): Promise<any> {
     const { ticket_id, staff_id } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.unsubscribeFromTicket(ticket_id, staff_id);
+    return await this.endpoints(auth).unsubscribeFromTicket(ticket_id, staff_id);
   }
 
   async createTicketsBulk(args: any, auth: HappyFoxAuth): Promise<any> {
     const { tickets } = args;
-    const client = new HappyFoxClient(auth);
-    const endpoints = new TicketEndpoints(client);
-    return await endpoints.createTicketsBulk(tickets);
+    return await this.endpoints(auth).createTicketsBulk(tickets);
   }
 }

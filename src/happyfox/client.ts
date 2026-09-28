@@ -5,7 +5,6 @@ export interface RequestOptions {
   path: string;
   body?: any;
   queryParams?: Record<string, string | number | boolean>;
-  headers?: Record<string, string>;
 }
 
 export class HappyFoxClient {
@@ -22,7 +21,7 @@ export class HappyFoxClient {
   }
 
   async makeRequest<T = any>(options: RequestOptions, retryCount = 0): Promise<T> {
-    const { method, path, body, queryParams, headers = {} } = options;
+    const { method, path, body, queryParams } = options;
 
     let url = `${this.baseUrl}${path}`;
     if (queryParams) {
@@ -37,8 +36,7 @@ export class HappyFoxClient {
 
     const requestHeaders: Record<string, string> = {
       'Authorization': authHeader,
-      'Content-Type': 'application/json',
-      ...headers
+      'Content-Type': 'application/json'
     };
 
     try {
@@ -48,7 +46,6 @@ export class HappyFoxClient {
         body: body ? JSON.stringify(body) : undefined
       });
 
-      // Handle rate limiting with exponential backoff
       if (response.status === 429) {
         if (retryCount >= this.maxRetries) {
           throw new HappyFoxAPIError(
@@ -58,7 +55,7 @@ export class HappyFoxClient {
           );
         }
 
-        // Calculate exponential backoff delay with jitter
+        // Jitter spreads out retries from concurrent requests
         const jitter = Math.random() * 1000;
         const delay = Math.min(
           this.baseDelay * Math.pow(2, retryCount) + jitter,
@@ -67,12 +64,10 @@ export class HappyFoxClient {
 
         console.warn(`Rate limited. Retrying in ${Math.round(delay)}ms (attempt ${retryCount + 1}/${this.maxRetries})`);
 
-        // Wait and retry
         await this.sleep(delay);
         return this.makeRequest<T>(options, retryCount + 1);
       }
 
-      // Handle other error responses
       if (!response.ok) {
         const errorBody = await response.text();
         let errorMessage = `HappyFox API error: ${response.status} ${response.statusText}`;
@@ -85,7 +80,6 @@ export class HappyFoxClient {
             errorMessage = errorJson.message;
           }
         } catch {
-          // If not JSON, use the text as is
           if (errorBody) {
             errorMessage = errorBody;
           }
@@ -94,7 +88,6 @@ export class HappyFoxClient {
         throw new HappyFoxAPIError(errorMessage, response.status, 'API_ERROR');
       }
 
-      // Parse successful response
       const responseText = await response.text();
       if (!responseText) {
         return {} as T;
@@ -103,11 +96,10 @@ export class HappyFoxClient {
       try {
         return JSON.parse(responseText);
       } catch {
-        // Some endpoints might return non-JSON responses
+        // Some endpoints return non-JSON bodies
         return responseText as unknown as T;
       }
     } catch (error) {
-      // Retry on network errors
       if (retryCount < this.maxRetries && this.isRetryableError(error)) {
         const delay = Math.min(
           this.baseDelay * Math.pow(2, retryCount),
@@ -120,7 +112,6 @@ export class HappyFoxClient {
         return this.makeRequest<T>(options, retryCount + 1);
       }
 
-      // Re-throw if not retryable or max retries reached
       if (error instanceof HappyFoxAPIError) {
         throw error;
       }
@@ -133,31 +124,17 @@ export class HappyFoxClient {
     }
   }
 
+  // Transport failures only: fetch() raises a TypeError, Node-style sockets set `.code`.
+  // No 5xx check - every HappyFoxAPIError carries a `code`, so it never reached one.
   private isRetryableError(error: any): boolean {
-    // Retry on network errors
-    if (error instanceof TypeError && error.message.includes('fetch')) {
-      return true;
-    }
-
-    // Retry on specific error codes
-    if (error.code) {
-      const retryableCodes = ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED'];
-      return retryableCodes.includes(error.code);
-    }
-
-    // Retry on 5xx errors (server errors)
-    if (error instanceof HappyFoxAPIError) {
-      return error.statusCode >= 500 && error.statusCode < 600;
-    }
-
-    return false;
+    if (error instanceof TypeError && error.message.includes('fetch')) return true;
+    return ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED'].includes(error?.code);
   }
 
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  // Convenience methods for common HTTP methods
   async get<T = any>(path: string, queryParams?: Record<string, string | number | boolean>): Promise<T> {
     return this.makeRequest<T>({ method: 'GET', path, queryParams });
   }

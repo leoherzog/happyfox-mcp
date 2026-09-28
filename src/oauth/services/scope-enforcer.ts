@@ -1,16 +1,11 @@
 /**
- * Scope Enforcer Service
- *
- * Manages OAuth scope-to-tool mapping, scope enforcement, and staff_id auto-injection.
+ * OAuth scope-to-tool mapping, scope enforcement, and staff_id auto-injection.
  */
 
 import { MCPTool } from '../../types';
 import { HappyFoxScope } from '../types';
 
-/**
- * Tool-to-scope mapping
- * Each tool requires at least one of its listed scopes
- */
+/** Each tool requires at least ONE of its listed scopes. */
 export const TOOL_SCOPE_MAP: Record<string, HappyFoxScope[]> = {
   // Read operations (happyfox:read)
   'happyfox_list_tickets': ['happyfox:read'],
@@ -49,10 +44,7 @@ export const TOOL_SCOPE_MAP: Record<string, HappyFoxScope[]> = {
   'happyfox_delete_asset': ['happyfox:admin'],
 };
 
-/**
- * Tools that require a staff_id-like parameter
- * Maps tool name to the parameter name used for staff ID
- */
+/** Tool name -> the parameter that carries the acting staff member's id. */
 export const TOOLS_REQUIRING_STAFF_ID: Record<string, string> = {
   // Ticket tools using 'staff_id'
   'happyfox_add_staff_reply': 'staff_id',
@@ -70,46 +62,24 @@ export const TOOLS_REQUIRING_STAFF_ID: Record<string, string> = {
   'happyfox_delete_asset': 'deleted_by',
 };
 
-/**
- * Check if granted scopes include required scopes for a tool
- *
- * @param grantedScopes - Scopes granted to the OAuth token
- * @param toolName - Name of the tool to check
- * @returns true if user has at least one required scope
- */
-export function hasRequiredScopes(
+/** An unknown tool is denied by default. */
+function hasRequiredScopes(
   grantedScopes: string[],
   toolName: string
 ): boolean {
   const requiredScopes = TOOL_SCOPE_MAP[toolName];
-
-  // Unknown tool - deny by default
   if (!requiredScopes) {
     return false;
   }
 
-  // Check if any required scope is granted
   return requiredScopes.some(scope => grantedScopes.includes(scope));
 }
 
-/**
- * Get the required scopes for a tool
- *
- * @param toolName - Name of the tool
- * @returns Array of required scopes, or undefined if tool is unknown
- */
+/** Undefined for an unknown tool. */
 export function getRequiredScopes(toolName: string): HappyFoxScope[] | undefined {
   return TOOL_SCOPE_MAP[toolName];
 }
 
-/**
- * Filter tools list by granted scopes
- * Only returns tools the user has permission to use
- *
- * @param tools - Full list of available tools
- * @param grantedScopes - Scopes granted to the OAuth token
- * @returns Filtered list of permitted tools
- */
 export function filterToolsByScopes(
   tools: MCPTool[],
   grantedScopes: string[]
@@ -117,32 +87,21 @@ export function filterToolsByScopes(
   return tools.filter(tool => hasRequiredScopes(grantedScopes, tool.name));
 }
 
-/**
- * Inject staff_id into tool arguments if not already provided
- *
- * @param toolName - Name of the tool being called
- * @param args - Original tool arguments
- * @param defaultStaffId - Staff ID to inject if not provided
- * @returns Arguments with staff_id injected if needed
- */
+/** Fills in the acting staff id only when the caller did not supply one. */
 export function injectStaffId(
   toolName: string,
   args: Record<string, any>,
   defaultStaffId: number
 ): Record<string, any> {
   const paramName = TOOLS_REQUIRING_STAFF_ID[toolName];
-
-  // Tool doesn't require staff_id
   if (!paramName) {
     return args;
   }
 
-  // Staff ID already provided - don't override
   if (args[paramName] !== undefined && args[paramName] !== null) {
     return args;
   }
 
-  // Inject the default staff ID
   return {
     ...args,
     [paramName]: defaultStaffId,

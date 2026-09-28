@@ -8,7 +8,7 @@ const mockFetch = vi.fn();
 
 describe("ToolRegistry", () => {
   let registry: ToolRegistry;
-  let originalFetch: typeof global.fetch;
+  let originalFetch: typeof globalThis.fetch;
 
   const testAuth: HappyFoxAuth = {
     apiKey: "test-api-key",
@@ -17,19 +17,19 @@ describe("ToolRegistry", () => {
     region: "us"
   };
 
+  const allScopes = ["happyfox:read", "happyfox:write", "happyfox:admin"];
+
   const testAuthContext: AuthContext = {
     credentials: testAuth,
     staffId: 1,
-    staffEmail: "test@example.com",
-    scopes: ["happyfox:read", "happyfox:write", "happyfox:admin"],
-    tokenId: "test-token-id"
+    scopes: allScopes
   };
 
   beforeEach(() => {
     registry = new ToolRegistry();
     // Replace global fetch with mock to prevent network calls
-    originalFetch = global.fetch;
-    global.fetch = mockFetch;
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch;
     // Default mock response for API calls
     mockFetch.mockResolvedValue({
       ok: false,
@@ -41,7 +41,7 @@ describe("ToolRegistry", () => {
 
   afterEach(() => {
     // Restore original fetch
-    global.fetch = originalFetch;
+    globalThis.fetch = originalFetch;
     mockFetch.mockReset();
   });
 
@@ -54,14 +54,14 @@ describe("ToolRegistry", () => {
 
   describe("listTools", () => {
     it("returns all registered tools", async () => {
-      const tools = await registry.listTools();
+      const tools = await registry.listTools(allScopes);
 
       expect(Array.isArray(tools)).toBe(true);
       expect(tools.length).toBeGreaterThan(0);
     });
 
     it("returns tools with correct structure", async () => {
-      const tools = await registry.listTools();
+      const tools = await registry.listTools(allScopes);
 
       for (const tool of tools) {
         expect(tool).toHaveProperty("name");
@@ -73,7 +73,7 @@ describe("ToolRegistry", () => {
     });
 
     it("includes expected tool names", async () => {
-      const tools = await registry.listTools();
+      const tools = await registry.listTools(allScopes);
       const toolNames = tools.map(t => t.name);
 
       // Check for tools from each module
@@ -83,7 +83,7 @@ describe("ToolRegistry", () => {
     });
 
     it("includes all ticket tools", async () => {
-      const tools = await registry.listTools();
+      const tools = await registry.listTools(allScopes);
       const toolNames = tools.map(t => t.name);
 
       expect(toolNames).toContain("happyfox_create_ticket");
@@ -93,7 +93,7 @@ describe("ToolRegistry", () => {
     });
 
     it("includes all contact tools", async () => {
-      const tools = await registry.listTools();
+      const tools = await registry.listTools(allScopes);
       const toolNames = tools.map(t => t.name);
 
       expect(toolNames).toContain("happyfox_create_contact");
@@ -102,13 +102,25 @@ describe("ToolRegistry", () => {
     });
 
     it("includes all asset tools", async () => {
-      const tools = await registry.listTools();
+      const tools = await registry.listTools(allScopes);
       const toolNames = tools.map(t => t.name);
 
       expect(toolNames).toContain("happyfox_create_asset");
       expect(toolNames).toContain("happyfox_get_asset");
       expect(toolNames).toContain("happyfox_delete_asset");
       expect(toolNames).toContain("happyfox_list_asset_custom_fields");
+    });
+
+    it("returns no tools for an empty scope list", async () => {
+      expect(await registry.listTools([])).toEqual([]);
+    });
+
+    it("returns only the tools a single scope permits", async () => {
+      const toolNames = (await registry.listTools(["happyfox:read"])).map(t => t.name);
+
+      expect(toolNames).toContain("happyfox_list_tickets");
+      expect(toolNames).not.toContain("happyfox_create_ticket");
+      expect(toolNames).not.toContain("happyfox_delete_ticket");
     });
   });
 
@@ -193,7 +205,7 @@ describe("ToolRegistry", () => {
 
   describe("tool registration", () => {
     it("registers tools with unique names", async () => {
-      const tools = await registry.listTools();
+      const tools = await registry.listTools(allScopes);
       const toolNames = tools.map(t => t.name);
       const uniqueNames = new Set(toolNames);
 
@@ -203,7 +215,7 @@ describe("ToolRegistry", () => {
     it("binds handlers correctly", async () => {
       // Verify that handlers are bound by checking they exist for all tools
       // Uses mocked fetch to prevent network calls
-      const tools = await registry.listTools();
+      const tools = await registry.listTools(allScopes);
 
       for (const tool of tools) {
         // This would throw ToolNotFoundError if handler wasn't registered

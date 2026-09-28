@@ -1,19 +1,8 @@
 import { HappyFoxClient } from '../client';
+import { formatPhones } from './phones';
 
 export class ContactEndpoints {
   constructor(private client: HappyFoxClient) {}
-
-  // Phone type mapping: API uses short codes
-  private mapPhoneType(type: string): string {
-    const typeMap: Record<string, string> = {
-      'mobile': 'mo',
-      'work': 'w',
-      'main': 'm',
-      'home': 'h',
-      'other': 'o'
-    };
-    return typeMap[type.toLowerCase()] || 'o';
-  }
 
   async createContact(data: {
     name: string;
@@ -28,26 +17,18 @@ export class ContactEndpoints {
       email: data.email
     };
 
-    // Handle phones - use phones array format per HappyFox API
     if (data.phones && data.phones.length > 0) {
-      formData.phones = data.phones.map((phone, index) => ({
-        type: this.mapPhoneType(phone.type),
-        number: phone.number,
-        is_primary: phone.is_primary ?? (index === 0)
-      }));
+      formData.phones = formatPhones(data.phones);
     }
 
-    // Handle contact groups
     if (data.contact_groups && data.contact_groups.length > 0) {
       formData.contact_groups = data.contact_groups.join(',');
     }
 
-    // Handle login permission
     if (data.is_login_enabled !== undefined) {
       formData.is_login_enabled = data.is_login_enabled;
     }
 
-    // Handle custom fields
     if (data.custom_fields) {
       Object.entries(data.custom_fields).forEach(([key, value]) => {
         formData[key] = value;
@@ -89,31 +70,18 @@ export class ContactEndpoints {
     if (updates.name) formData.name = updates.name;
     if (updates.email) formData.email = updates.email;
 
-    // Handle phones - use phones array format per HappyFox API
     if (updates.phones && updates.phones.length > 0) {
-      formData.phones = updates.phones.map((phone, index) => {
-        const phoneObj: any = {
-          type: this.mapPhoneType(phone.type),
-          number: phone.number,
-          is_primary: phone.is_primary ?? (index === 0)
-        };
-        // Include id for existing phone numbers (required for updates)
-        if (phone.id) phoneObj.id = phone.id;
-        return phoneObj;
-      });
+      formData.phones = formatPhones(updates.phones, true);
     }
 
-    // Handle contact groups
     if (updates.contact_groups) {
       formData.contact_groups = updates.contact_groups.join(',');
     }
 
-    // Handle login permission
     if (updates.is_login_enabled !== undefined) {
       formData.is_login_enabled = updates.is_login_enabled;
     }
 
-    // Handle custom fields
     if (updates.custom_fields) {
       Object.entries(updates.custom_fields).forEach(([key, value]) => {
         formData[key] = value;
@@ -155,9 +123,10 @@ export class ContactEndpoints {
     return await this.client.post(`/contact_group/${groupId}/`, formData);
   }
 
+  /**
+   * API: POST /contact_group/<id>/update_contacts/
+   */
   async addContactsToGroup(groupId: string, contactIds: number[]): Promise<any> {
-    // Per HappyFox API: POST /contact_group/{id}/update_contacts/
-    // Payload: { contacts: [{ id: 1 }, { id: 2 }] }
     const formData = {
       contacts: contactIds.map(id => ({ id }))
     };
@@ -165,9 +134,10 @@ export class ContactEndpoints {
     return await this.client.post(`/contact_group/${groupId}/update_contacts/`, formData);
   }
 
+  /**
+   * API: POST /contact_group/<id>/delete_contacts/
+   */
   async removeContactsFromGroup(groupId: string, contactIds: number[]): Promise<any> {
-    // Per HappyFox API: POST /contact_group/{id}/delete_contacts/
-    // Payload: { contacts: [1, 2, 3] }
     const formData = {
       contacts: contactIds
     };

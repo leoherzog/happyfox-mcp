@@ -4,6 +4,12 @@
  */
 
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
+import type {
+  OAuthHelpers,
+  AuthRequest,
+  ClientInfo,
+  CompleteAuthorizationOptions,
+} from '@cloudflare/workers-oauth-provider';
 import {
   Env,
   AuthContext,
@@ -34,22 +40,20 @@ import { decodeMcpHeaderValue, HeaderValueError } from './mcp/headers';
 import { renderConsentPage, renderErrorPage } from './oauth/views/consent';
 import { renderHomePage } from './views/home';
 import { validateAndResolveStaff } from './oauth/services/happyfox-validator';
-import { createCredentialStore } from './oauth/services/credential-store';
+import { CredentialStore, decodeEncryptionKey } from './oauth/services/credential-store';
 import { AVAILABLE_SCOPES, DEFAULT_SCOPES, StoredCredentials, CREDENTIAL_TTL_SECONDS, HappyFoxScope } from './oauth/types';
 
 // Account name validation pattern (prevents SSRF)
 const ACCOUNT_NAME_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i;
 
 /**
- * Props stored in OAuth grant and passed to API handler
+ * Props stored in OAuth grant and passed to API handler. Everything else about the
+ * grant lives in the encrypted KV credential record keyed by tokenId; scopes are
+ * here because the library passes only props to the API handler.
  */
 interface OAuthProps {
   tokenId: string;
-  staffId: number;
-  staffEmail: string;
-  accountName: string;
-  region: 'us' | 'eu';
-  scopes: string[]; // Include scopes since library only passes props to handler
+  scopes: string[];
 }
 
 /**
@@ -60,49 +64,13 @@ interface EnvWithOAuth extends Env {
 }
 
 /**
- * OAuth helpers provided by the library
- */
-interface OAuthHelpers {
-  parseAuthRequest(request: Request): Promise<OAuthRequestInfo>;
-  lookupClient(clientId: string): Promise<ClientInfo | null>;
-  completeAuthorization(options: CompleteAuthOptions): Promise<{ redirectTo: string }>;
-}
-
-interface OAuthRequestInfo {
-  responseType: string;
-  clientId: string;
-  redirectUri: string;
-  scope: string[];
-  state?: string;
-  codeChallenge?: string;
-  codeChallengeMethod?: string;
-  resource?: string | string[]; // RFC 8707 allows repeating the parameter
-}
-
-interface ClientInfo {
-  clientId: string;
-  clientName?: string;
-  clientUri?: string;
-  logoUri?: string;
-  redirectUris?: string[];
-}
-
-interface CompleteAuthOptions {
-  request: OAuthRequestInfo;
-  userId: string;
-  metadata?: Record<string, any>;
-  scope: string[];
-  props: OAuthProps;
-}
-
-/**
  * Build AuthContext from OAuth props by retrieving stored credentials
  */
 async function buildAuthContext(
   props: OAuthProps,
   env: Env
 ): Promise<AuthContext> {
-  const credentialStore = createCredentialStore(env.OAUTH_KV, env.CREDENTIAL_ENCRYPTION_KEY);
+  const credentialStore = new CredentialStore(env.OAUTH_KV, env.CREDENTIAL_ENCRYPTION_KEY);
   const storedCreds = await credentialStore.retrieve(props.tokenId);
 
   if (!storedCreds) {
@@ -117,24 +85,17 @@ async function buildAuthContext(
       region: storedCreds.region,
     },
     staffId: storedCreds.staffId,
-    staffEmail: storedCreds.staffEmail,
-    scopes: props.scopes || [], // Get scopes from props (library only passes props to handler)
-    tokenId: props.tokenId,
+    scopes: props.scopes || [],
   };
 }
 
 /**
- * MCP API Handler - Processes authenticated MCP requests
+ * MCP API Handler - processes authenticated MCP requests.
  *
- * MCP 2026-07-28 is stateless. `Mcp-Session-Id` and `Last-Event-ID` are never read,
- * never minted and never echoed - inbound copies are ignored, not rejected. Do not
- * re-introduce them.
- *
- * Note: Uses 'any' for env/ctx types to satisfy OAuthProvider's generic handler type requirements.
- * The OAuth provider adds 'props' and 'scopes' to the ctx object at runtime.
- *
- * Exported so the validation pipeline can be exercised directly in tests (the OAuth
- * provider answers 401 before the handler runs, so integration tests cannot reach it).
+ * MCP 2026-07-28 is stateless: `Mcp-Session-Id` and `Last-Event-ID` are never read, minted or
+ * echoed - inbound copies are ignored, not rejected. Do not re-introduce them.
+ * env/ctx are 'any' to satisfy OAuthProvider's handler type; it adds `props` at runtime.
+ * Exported so tests can drive the pipeline directly (the provider answers 401 first).
  */
 export class McpApiHandler {
   async fetch(
@@ -145,8 +106,8 @@ export class McpApiHandler {
     const typedEnv = env as Env;
     const typedCtx = ctx as ExecutionContext & { props: OAuthProps; scopes: string[] };
 
-    // 1. Validate CREDENTIAL_ENCRYPTION_KEY (must be valid 32-byte base64 for AES-256-GCM)
-    if (!this.isValidEncryptionKey(typedEnv.CREDENTIAL_ENCRYPTION_KEY)) {
+    // 1. Checked before anything else so a misconfigured server answers 500, not 401.
+    if (!decodeEncryptionKey(typedEnv.CREDENTIAL_ENCRYPTION_KEY)) {
       return this.jsonRpcError(INTERNAL_ERROR, 'Internal error: Server misconfigured.', undefined, 500);
     }
 
@@ -165,8 +126,7 @@ export class McpApiHandler {
       return corsMiddleware.handlePreflight(origin);
     }
 
-    // 4. POST is the only method this transport accepts. No SSE stream (GET), no
-    //    session termination (DELETE) - both are gone with the session concept.
+    // 4. POST only: no SSE stream (GET) and no session termination (DELETE).
     if (request.method !== 'POST') {
       return new Response('Method Not Allowed. This server implements MCP 2026-07-28 (POST only).', {
         status: 405,
@@ -206,8 +166,7 @@ export class McpApiHandler {
     }
     const method = body.method;
 
-    // 10. No id means a notification. This revision defines no client-to-server
-    //     notifications, so accept it, do no work, and run no header validation.
+    // 10. No id means a notification: this revision defines none, so do no work and 202.
     if (!('id' in body)) {
       return new Response(null, { status: 202, headers: corsHeaders });
     }
@@ -231,8 +190,7 @@ export class McpApiHandler {
       return this.jsonRpcError(INVALID_REQUEST, 'Invalid Request: Content-Type must be application/json', id, 400, corsHeaders);
     }
 
-    // 14/15. Mcp-Method must be present and match the body method exactly.
-    //        Header names are case-insensitive; header values are case-sensitive.
+    // 14/15. Mcp-Method must be present and match the body method exactly (values are case-sensitive).
     const mcpMethodHeader = request.headers.get('Mcp-Method');
     if (!mcpMethodHeader) {
       return this.jsonRpcError(HEADER_MISMATCH, `Header mismatch: Mcp-Method header is required. This server implements MCP ${MCP_PROTOCOL_VERSION} only.`, id, 400, corsHeaders);
@@ -297,11 +255,8 @@ export class McpApiHandler {
         throw error;
       }
 
-      // An absent or non-string mirrored body field is a malformed request
-      // (it fails the CallToolRequest / ReadResourceRequest schema), which the
-      // tools page classes as a protocol error: -32602, at HTTP 400 like every
-      // other structurally invalid request. -32020 is reserved for a header
-      // that disagrees with a body value that is actually there.
+      // A missing/non-string mirrored body field is a schema failure: -32602.
+      // -32020 is reserved for a header that disagrees with a body value that is there.
       const field = method === 'tools/call' ? 'name' : 'uri';
       const bodyValue = params[field];
       if (typeof bodyValue !== 'string' || bodyValue.length === 0) {
@@ -323,10 +278,9 @@ export class McpApiHandler {
       );
     }
 
-    // 26. Build AuthContext from OAuth props. The bearer token itself was valid
-    //     (the OAuth provider checked it) but the credentials behind it are gone,
-    //     so the token can no longer be used: RFC 6750 `invalid_token`, with the
-    //     resource_metadata pointer every 401 must carry so the client can re-authorize.
+    // 26. Build AuthContext. The bearer token was valid but its credentials are gone,
+    //     so the token is unusable: RFC 6750 `invalid_token` plus the resource_metadata
+    //     pointer the client needs to re-authorize.
     let authContext: AuthContext;
     try {
       authContext = await buildAuthContext(typedCtx.props, typedEnv);
@@ -342,11 +296,9 @@ export class McpApiHandler {
       );
     }
 
-    // 27. Dispatch. Everything the protocol layer returns - including application-level
-    //     -32602 (unknown tool, unknown resource, bad cursor) - is HTTP 200. The one
-    //     thing it throws is a scope failure, which is HTTP 403 with an
-    //     `insufficient_scope` challenge naming the scopes the operation needs
-    //     (authorization spec, "Runtime Insufficient Scope Errors").
+    // 27. Dispatch. Everything the protocol layer returns is HTTP 200, including
+    //     application-level -32602; only a scope failure throws, and that is HTTP 403
+    //     with an `insufficient_scope` challenge naming the scopes required.
     const mcpServer = new MCPServer(authContext);
     let response: MCPResponse;
     try {
@@ -372,10 +324,9 @@ export class McpApiHandler {
   }
 
   /**
-   * RFC 6750 §3 Bearer challenge. `resource_metadata` (RFC 9728 §5.1) uses the same
-   * path-suffixed document the OAuth provider names on its own 401s, so a client
-   * that discovered the authorization server from one challenge can reuse it from
-   * the other. Quotes and control characters are stripped from free-text parameters.
+   * RFC 6750 §3 Bearer challenge. `resource_metadata` (RFC 9728 §5.1) names the same
+   * path-suffixed document the OAuth provider uses on its own 401s, so a client can
+   * reuse what it discovered. Quotes and control chars are stripped from free text.
    */
   private bearerChallenge(request: Request, error: string, description: string, scope?: string[]): string {
     const url = new URL(request.url);
@@ -394,9 +345,8 @@ export class McpApiHandler {
   }
 
   /**
-   * Read a JSON-RPC id that is safe to echo. Returns undefined when the id is absent
-   * or is not a string/number - the `id` member is then omitted from the error response
-   * entirely (never sent as null).
+   * Read a JSON-RPC id that is safe to echo. Undefined when absent or not a
+   * string/number; the `id` member is then omitted entirely (never sent as null).
    */
   private readId(body: Record<string, unknown>): string | number | undefined {
     const raw = body.id;
@@ -429,27 +379,14 @@ export class McpApiHandler {
       headers: { 'Content-Type': 'application/json', ...corsHeaders, ...extraHeaders }
     });
   }
-
-  /**
-   * Validate CREDENTIAL_ENCRYPTION_KEY is a valid 32-byte base64 string
-   */
-  private isValidEncryptionKey(key: string | undefined): boolean {
-    if (!key) return false;
-    try {
-      const decoded = atob(key);
-      return decoded.length === 32;
-    } catch {
-      return false;
-    }
-  }
 }
 
 /**
- * Default Handler - Handles non-API requests (home page, consent flow)
- * Note: Uses 'any' for env type to satisfy OAuthProvider's generic handler type requirements
+ * Default Handler - non-API requests (home page, consent flow).
+ * env is 'any' to satisfy OAuthProvider's generic handler type.
  */
 const defaultHandler = {
-  async fetch(request: Request, env: any, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: any): Promise<Response> {
     const typedEnv = env as EnvWithOAuth;
     const url = new URL(request.url);
 
@@ -470,21 +407,17 @@ const defaultHandler = {
       });
     }
 
-    // Note: /.well-known/oauth-authorization-server and /.well-known/oauth-protected-resource
-    // (including the RFC 9728 path-suffixed variants) are answered by OAuthProvider before it
-    // delegates here, so there is nothing to route for them.
+    // OAuthProvider answers the /.well-known/* discovery documents (including the RFC 9728
+    // path-suffixed variants) before delegating here, so there is nothing to route for them.
 
-    // Handle authorization endpoint
     if (url.pathname === '/authorize') {
       return handleAuthorize(request, typedEnv);
     }
 
-    // Handle staff validation endpoint (for consent form)
     if (url.pathname === '/api/validate-staff' && request.method === 'POST') {
       return handleValidateStaff(request);
     }
 
-    // 404 for other paths
     return new Response('Not Found', { status: 404 });
   }
 };
@@ -515,9 +448,8 @@ async function timingSafeCompare(a: string, b: string): Promise<boolean> {
  */
 async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Response> {
   try {
-    const oauthReq = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+    const oauthReq: AuthRequest = await env.OAUTH_PROVIDER.parseAuthRequest(request);
 
-    // Validate response_type
     if (oauthReq.responseType !== 'code') {
       return new Response(
         renderErrorPage('Invalid Request', 'Unsupported response_type. Only "code" is supported.'),
@@ -533,7 +465,6 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
       );
     }
 
-    // Look up client metadata
     const clientInfo = await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId);
     if (!clientInfo) {
       return new Response(
@@ -554,7 +485,6 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
       requestedScopes = [...DEFAULT_SCOPES];
     }
 
-    // Handle GET - show consent form with CSRF token
     if (request.method === 'GET') {
       const csrfToken = generateCsrfToken();
       const html = renderConsentPage({
@@ -573,11 +503,9 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
       });
     }
 
-    // Handle POST - process consent form
     if (request.method === 'POST') {
       const formData = await request.formData();
 
-      // CSRF validation
       const formCsrfToken = formData.get('csrf_token') as string || '';
       const cookieHeader = request.headers.get('Cookie') || '';
       const csrfCookieMatch = cookieHeader.match(/csrf_token=([^;]+)/);
@@ -596,7 +524,6 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
       const email = (formData.get('email') as string || '').trim();
       const region = (formData.get('region') as 'us' | 'eu') || 'us';
 
-      // Validation
       if (!ACCOUNT_NAME_PATTERN.test(accountName)) {
         return consentErrorResponse(clientInfo, requestedScopes, 'Invalid account subdomain format.', { accountName, email, region });
       }
@@ -604,7 +531,6 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
         return consentErrorResponse(clientInfo, requestedScopes, 'All fields are required.', { accountName, email, region });
       }
 
-      // Validate credentials and resolve staff ID
       const validationResult = await validateAndResolveStaff(
         { apiKey, authCode, accountName, region },
         email
@@ -614,7 +540,6 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
         return consentErrorResponse(clientInfo, requestedScopes, validationResult.error || 'Validation failed.', { accountName, email, region });
       }
 
-      // Generate token ID and store credentials
       const tokenId = crypto.randomUUID();
       const now = Math.floor(Date.now() / 1000);
       const storedCredentials: StoredCredentials = {
@@ -622,33 +547,26 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
         staffId: validationResult.staffId,
         staffName: validationResult.staffName,
         staffEmail: email,
-        createdAt: now,
         expiresAt: now + CREDENTIAL_TTL_SECONDS,
       };
 
-      const credentialStore = createCredentialStore(env.OAUTH_KV, env.CREDENTIAL_ENCRYPTION_KEY);
+      const credentialStore = new CredentialStore(env.OAUTH_KV, env.CREDENTIAL_ENCRYPTION_KEY);
       await credentialStore.store(tokenId, storedCredentials);
 
-      // Complete OAuth authorization
-      const props: OAuthProps = {
-        tokenId,
-        staffId: validationResult.staffId,
-        staffEmail: email,
-        accountName,
-        region,
-        scopes: requestedScopes, // Include scopes in props since library only passes props to handler
-      };
+      const props: OAuthProps = { tokenId, scopes: requestedScopes };
 
       // The resource parameter is passed through untouched: as of library v0.4.0,
       // audience checks parse the URI and treat a bare "/" path as covering the origin,
       // so the RFC 8707 binding survives the trailing slash that MCP clients send.
-      const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
+      const authorization: CompleteAuthorizationOptions = {
         request: oauthReq,
         userId: tokenId,
-        metadata: { staffName: validationResult.staffName, accountName },
+        metadata: {}, // required by the library; nothing here reads it back
         scope: requestedScopes,
         props,
-      });
+      };
+
+      const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization(authorization);
 
       return Response.redirect(redirectTo, 302);
     }
@@ -694,7 +612,6 @@ async function handleValidateStaff(request: Request): Promise<Response> {
 
     const { accountName, apiKey, authCode, region, email } = body;
 
-    // Validate required fields
     if (!accountName || !apiKey || !authCode || !email) {
       return Response.json({ valid: false, error: 'Missing required fields' }, { status: 400 });
     }
@@ -720,7 +637,6 @@ async function handleValidateStaff(request: Request): Promise<Response> {
   }
 }
 
-// Create the OAuth provider
 const oauthProvider = new OAuthProvider({
   apiRoute: '/mcp',
   apiHandler: new McpApiHandler(),
@@ -737,17 +653,14 @@ const oauthProvider = new OAuthProvider({
   // handleAuthorize already rejects anything but S256; this makes the library agree.
   allowPlainPKCE: false,
 
-  // Compare RFC 8707 resource indicators by origin instead of exact string. This server
-  // exposes a single resource on a single origin, so origin matching is equivalent in
-  // strength, and it keeps a client that sends `https://host/` in one request and
-  // `https://host/mcp` in the next from failing token exchange.
+  // One resource on one origin, so origin matching is as strong as exact-string matching
+  // and tolerates a client that sends `https://host/` then `https://host/mcp`.
   resourceMatchOriginOnly: true,
 });
 
 /**
- * Public discovery documents: identical for every caller, so they are safe to serve from
- * the edge cache. The OAuth library answers these itself (including the RFC 9728 §3.1
- * path-suffixed variants) and sets no Cache-Control of its own.
+ * Public discovery documents are identical for every caller and the library sets no
+ * Cache-Control of its own, so they are safe to cache at the edge.
  */
 function edgeCacheControlFor(pathname: string): string | null {
   if (pathname === '/.well-known/oauth-authorization-server') {
@@ -763,11 +676,10 @@ function edgeCacheControlFor(pathname: string): string | null {
 }
 
 /**
- * Workers Cache sits in front of this Worker (see `cache` in wrangler.jsonc), so caching
- * is opt-in. A response is cached only if it sets its own Cache-Control (the home page
- * does) or is a successful read of a public discovery document. Everything else -
- * consent, OAuth, MCP - is marked no-store so it can never be served to another user
- * from the edge.
+ * Workers Cache sits in front of this Worker (see `cache` in wrangler.jsonc), so caching is
+ * opt-in: a response is cached only when it sets its own Cache-Control or is a successful
+ * read of a public discovery document. Everything else is no-store, so a user-specific
+ * response can never be served to someone else from the edge.
  */
 function withCacheDefaults(request: Request, response: Response): Response {
   if (response.headers.has('Cache-Control')) {
