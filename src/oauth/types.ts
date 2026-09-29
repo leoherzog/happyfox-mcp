@@ -47,17 +47,19 @@ export interface StaffValidationResult {
   valid: boolean;
   staffId?: number;
   staffName?: string;
+  /** The agent's role permissions from GET /staff/; absent when HappyFox sent none. */
+  permissions?: string[];
   error?: string;
 }
 
 // OAuth scope type
 export type HappyFoxScope = 'happyfox:read' | 'happyfox:write' | 'happyfox:admin';
 
-// Scope descriptions for consent page
+/** Shown on the consent and home pages; must match the tools TOOL_SCOPE_MAP puts under each scope. */
 export const SCOPE_DESCRIPTIONS: Record<HappyFoxScope, string> = {
-  'happyfox:read': 'Read tickets, contacts, and assets',
-  'happyfox:write': 'Create and update tickets, add replies',
-  'happyfox:admin': 'Delete tickets, manage categories',
+  'happyfox:read': 'Read tickets, contacts, contact groups, assets, reports and the knowledge base, plus reference data such as categories, statuses and staff',
+  'happyfox:write': 'Create and update tickets, contacts, contact groups and assets; reply to, forward and add private notes to tickets',
+  'happyfox:admin': 'Delete tickets and assets, move tickets to another category, and replace the choices of ticket custom fields account-wide',
 };
 
 // All available scopes

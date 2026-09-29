@@ -3,6 +3,7 @@
  * MCP 2026-07-28 Streamable HTTP Transport with OAuth 2.0 Authentication
  */
 
+import { env as workerEnv } from 'cloudflare:workers';
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
 import type {
   OAuthHelpers,
@@ -13,6 +14,7 @@ import type {
 import {
   Env,
   AuthContext,
+  HappyFoxAuth,
   MCPRequest,
   MCPResponse,
   MCP_PROTOCOL_VERSION,
@@ -31,6 +33,7 @@ import {
   UNAUTHORIZED,
   INSUFFICIENT_SCOPE,
   InsufficientScopeError,
+  CredentialsRejectedError,
   isSupportedMethod,
   type UnsupportedProtocolVersionData,
 } from './types';
@@ -39,22 +42,21 @@ import { CORSMiddleware } from './middleware/cors';
 import { decodeMcpHeaderValue, HeaderValueError } from './mcp/headers';
 import { renderConsentPage, renderErrorPage } from './oauth/views/consent';
 import { renderHomePage } from './views/home';
-import { validateAndResolveStaff } from './oauth/services/happyfox-validator';
-import { CredentialStore, decodeEncryptionKey } from './oauth/services/credential-store';
-import { AVAILABLE_SCOPES, DEFAULT_SCOPES, StoredCredentials, CREDENTIAL_TTL_SECONDS, HappyFoxScope } from './oauth/types';
+import { validateAndResolveStaff, permissionWarnings } from './oauth/services/happyfox-validator';
+import { CredentialStore, decodeEncryptionKey, storedAuth } from './oauth/services/credential-store';
+import { revalidateOnRefresh } from './oauth/services/grant-revalidation';
+import { ACCOUNT_NAME_PATTERN, isRegion, parseApiHost } from './happyfox/host';
+import {
+  AVAILABLE_SCOPES,
+  DEFAULT_SCOPES,
+  StoredCredentials,
+  CREDENTIAL_TTL_SECONDS,
+  HappyFoxScope,
+  OAuthProps,
+} from './oauth/types';
 
-// Account name validation pattern (prevents SSRF)
-const ACCOUNT_NAME_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i;
-
-/**
- * Props stored in OAuth grant and passed to API handler. Everything else about the
- * grant lives in the encrypted KV credential record keyed by tokenId; scopes are
- * here because the library passes only props to the API handler.
- */
-interface OAuthProps {
-  tokenId: string;
-  scopes: string[];
-}
+const INVALID_API_HOST_MESSAGE =
+  'Enter the custom domain as a host name only, such as support.example.com, without https://, a port or a path.';
 
 /**
  * Extended environment with OAuth provider helpers
@@ -78,12 +80,9 @@ async function buildAuthContext(
   }
 
   return {
-    credentials: {
-      apiKey: storedCreds.apiKey,
-      authCode: storedCreds.authCode,
-      accountName: storedCreds.accountName,
-      region: storedCreds.region,
-    },
+    // Throws for a region, account or host that consent would reject, so a crafted record
+    // can never reach a request URL or a reference-cache key.
+    credentials: storedAuth(storedCreds),
     staffId: storedCreds.staffId,
     scopes: props.scopes || [],
   };
@@ -297,13 +296,26 @@ export class McpApiHandler {
     }
 
     // 27. Dispatch. Everything the protocol layer returns is HTTP 200, including
-    //     application-level -32602; only a scope failure throws, and that is HTTP 403
-    //     with an `insufficient_scope` challenge naming the scopes required.
+    //     application-level -32602. Only two failures throw: a scope failure is HTTP 403
+    //     with an `insufficient_scope` challenge naming the scopes required, and a HappyFox
+    //     401 ends the grant and is HTTP 401 with an `invalid_token` challenge.
     const mcpServer = new MCPServer(authContext);
     let response: MCPResponse;
     try {
       response = await mcpServer.handleRequest(body as unknown as MCPRequest);
     } catch (error) {
+      if (error instanceof CredentialsRejectedError) {
+        await this.endGrant(env, typedCtx.props.tokenId);
+        return this.jsonRpcError(
+          UNAUTHORIZED,
+          'Unauthorized: HappyFox rejected the stored API key and auth code. Please re-authorize with a working key.',
+          id,
+          401,
+          corsHeaders,
+          undefined,
+          { 'WWW-Authenticate': this.bearerChallenge(request, 'invalid_token', 'HappyFox rejected the stored API key and auth code') }
+        );
+      }
       if (error instanceof InsufficientScopeError) {
         return this.jsonRpcError(
           INSUFFICIENT_SCOPE,
@@ -321,6 +333,29 @@ export class McpApiHandler {
     return new Response(JSON.stringify(response), {
       headers: { 'Content-Type': 'application/json', ...corsHeaders }
     });
+  }
+
+  /**
+   * End a grant whose HappyFox credentials were rejected: delete the stored credentials, so its
+   * access tokens fail step 26 and its refresh fails revalidation, then revoke the OAuth grant.
+   * Consent makes the tokenId the grant's userId, and a tokenId is minted per consent, so this
+   * revokes only the grant that made the request. Failures are logged, never thrown.
+   */
+  private async endGrant(env: Partial<EnvWithOAuth>, tokenId: string): Promise<void> {
+    try {
+      await new CredentialStore(env.OAUTH_KV!, env.CREDENTIAL_ENCRYPTION_KEY!).delete(tokenId);
+    } catch (error) {
+      console.error('Failed to delete rejected credentials:', error);
+    }
+
+    const provider = env.OAUTH_PROVIDER;
+    if (!provider) return;
+    try {
+      const { items } = await provider.listUserGrants(tokenId);
+      await Promise.all(items.map(grant => provider.revokeGrant(grant.id, tokenId)));
+    } catch (error) {
+      console.error('Failed to revoke grant with rejected credentials:', error);
+    }
   }
 
   /**
@@ -443,6 +478,12 @@ async function timingSafeCompare(a: string, b: string): Promise<boolean> {
   return crypto.subtle.timingSafeEqual(hashA, hashB);
 }
 
+/** True when `token` is non-empty and equals the request's `csrf_token` cookie. */
+async function csrfTokenMatches(request: Request, token: string): Promise<boolean> {
+  const cookie = /(?:^|;\s*)csrf_token=([^;]+)/.exec(request.headers.get('Cookie') ?? '')?.[1] ?? '';
+  return token !== '' && cookie !== '' && await timingSafeCompare(token, cookie);
+}
+
 /**
  * Handle /authorize endpoint
  */
@@ -498,7 +539,8 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
         status: 200,
         headers: {
           'Content-Type': 'text/html',
-          'Set-Cookie': `csrf_token=${csrfToken}; HttpOnly; Secure; SameSite=Strict; Path=/authorize; Max-Age=600`,
+          // Path=/ so /api/validate-staff receives it too.
+          'Set-Cookie': `csrf_token=${csrfToken}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=600`,
         }
       });
     }
@@ -506,44 +548,53 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
     if (request.method === 'POST') {
       const formData = await request.formData();
 
-      const formCsrfToken = formData.get('csrf_token') as string || '';
-      const cookieHeader = request.headers.get('Cookie') || '';
-      const csrfCookieMatch = cookieHeader.match(/csrf_token=([^;]+)/);
-      const cookieCsrfToken = csrfCookieMatch ? csrfCookieMatch[1] : '';
-
-      if (!formCsrfToken || !cookieCsrfToken || !(await timingSafeCompare(formCsrfToken, cookieCsrfToken))) {
+      const csrfToken = formField(formData, 'csrf_token');
+      if (!(await csrfTokenMatches(request, csrfToken))) {
         return new Response(
           renderErrorPage('Invalid Request', 'CSRF token validation failed. Please try again.'),
           { status: 400, headers: { 'Content-Type': 'text/html' } }
         );
       }
 
-      const accountName = (formData.get('account_name') as string || '').trim();
-      const apiKey = formData.get('api_key') as string || '';
-      const authCode = formData.get('auth_code') as string || '';
-      const email = (formData.get('email') as string || '').trim();
-      const region = (formData.get('region') as 'us' | 'eu') || 'us';
+      const accountName = formField(formData, 'account_name').trim();
+      const apiKey = formField(formData, 'api_key');
+      const authCode = formField(formData, 'auth_code');
+      const email = formField(formData, 'email').trim();
+      const rawRegion = formField(formData, 'region') || 'us';
+      const rawApiHost = formField(formData, 'api_host').trim();
+      const echo = { accountName, email, region: isRegion(rawRegion) ? rawRegion : 'us', apiHost: rawApiHost };
+      // The re-rendered form keeps the token, so the next submit and the live email check still pass.
+      const fail = (message: string) => consentErrorResponse(clientInfo, requestedScopes, message, echo, csrfToken);
 
+      // Docs/360 names exactly two hosted regions; anything else is refused, never defaulted.
+      if (!isRegion(rawRegion)) {
+        return fail('Choose the US or EU region.');
+      }
       if (!ACCOUNT_NAME_PATTERN.test(accountName)) {
-        return consentErrorResponse(clientInfo, requestedScopes, 'Invalid account subdomain format.', { accountName, email, region });
+        return fail('Invalid account subdomain format.');
+      }
+      const apiHost = rawApiHost ? parseApiHost(rawApiHost) : undefined;
+      if (apiHost === null) {
+        return fail(INVALID_API_HOST_MESSAGE);
       }
       if (!apiKey || !authCode || !email) {
-        return consentErrorResponse(clientInfo, requestedScopes, 'All fields are required.', { accountName, email, region });
+        return fail('Account subdomain, API key, auth code and staff email are required.');
       }
 
-      const validationResult = await validateAndResolveStaff(
-        { apiKey, authCode, accountName, region },
-        email
-      );
+      const credentials: HappyFoxAuth = {
+        apiKey, authCode, accountName, region: rawRegion,
+        ...(apiHost !== undefined && { apiHost }),
+      };
+      const validationResult = await validateAndResolveStaff(credentials, email);
 
       if (!validationResult.valid || !validationResult.staffId || !validationResult.staffName) {
-        return consentErrorResponse(clientInfo, requestedScopes, validationResult.error || 'Validation failed.', { accountName, email, region });
+        return fail(validationResult.error || 'Validation failed.');
       }
 
       const tokenId = crypto.randomUUID();
       const now = Math.floor(Date.now() / 1000);
       const storedCredentials: StoredCredentials = {
-        apiKey, authCode, accountName, region,
+        ...credentials,
         staffId: validationResult.staffId,
         staffName: validationResult.staffName,
         staffEmail: email,
@@ -581,11 +632,18 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
   }
 }
 
+/** A text field of a submitted form; '' when it is absent or a file. */
+function formField(form: FormData, name: string): string {
+  const value = form.get(name);
+  return typeof value === 'string' ? value : '';
+}
+
 function consentErrorResponse(
   clientInfo: ClientInfo,
   requestedScopes: string[],
   error: string,
-  formData: { accountName: string; email: string; region: string }
+  formData: { accountName: string; email: string; region: string; apiHost: string },
+  csrfToken: string
 ): Response {
   return new Response(renderConsentPage({
     clientName: clientInfo.clientName || clientInfo.clientId,
@@ -594,25 +652,31 @@ function consentErrorResponse(
     requestedScopes,
     error,
     formData,
+    csrfToken,
   }), { status: 400, headers: { 'Content-Type': 'text/html' } });
 }
 
 /**
- * Handle /api/validate-staff endpoint for real-time email validation
+ * Handle /api/validate-staff: real-time email validation for the consent form.
+ * Takes the form's fields plus the requested `scopes`, and answers `warnings` for tools
+ * those scopes expose that the agent's HappyFox role cannot use.
+ * Requires the consent page's CSRF token in `X-CSRF-Token`; a cross-origin page can neither read
+ * the token nor send the header, which needs a preflight this route never grants.
  */
 async function handleValidateStaff(request: Request): Promise<Response> {
+  if (!(await csrfTokenMatches(request, request.headers.get('X-CSRF-Token') ?? ''))) {
+    return Response.json({ valid: false, error: 'Reload the consent page and try again.' }, { status: 403 });
+  }
+
   try {
-    const body = await request.json() as {
-      accountName?: string;
-      apiKey?: string;
-      authCode?: string;
-      region?: string;
-      email?: string;
-    };
+    const body = await request.json() as Record<string, unknown>;
+    const { accountName, apiKey, authCode, email } = body;
 
-    const { accountName, apiKey, authCode, region, email } = body;
-
-    if (!accountName || !apiKey || !authCode || !email) {
+    if (
+      typeof accountName !== 'string' || typeof apiKey !== 'string' ||
+      typeof authCode !== 'string' || typeof email !== 'string' ||
+      !accountName || !apiKey || !authCode || !email
+    ) {
       return Response.json({ valid: false, error: 'Missing required fields' }, { status: 400 });
     }
 
@@ -621,16 +685,28 @@ async function handleValidateStaff(request: Request): Promise<Response> {
       return Response.json({ valid: false, error: 'Invalid account format' }, { status: 400 });
     }
 
-    const validRegion = region === 'eu' ? 'eu' : 'us';
+    const region = body.region === undefined || body.region === '' ? 'us' : body.region;
+    if (!isRegion(region)) {
+      return Response.json({ valid: false, error: 'Invalid region' }, { status: 400 });
+    }
+
+    const rawApiHost = body.apiHost === undefined || body.apiHost === '' ? undefined : body.apiHost;
+    const apiHost = rawApiHost === undefined ? undefined : parseApiHost(rawApiHost);
+    if (apiHost === null) {
+      return Response.json({ valid: false, error: INVALID_API_HOST_MESSAGE }, { status: 400 });
+    }
+
     const result = await validateAndResolveStaff(
-      { apiKey, authCode, accountName, region: validRegion },
+      { apiKey, authCode, accountName, region, ...(apiHost !== undefined && { apiHost }) },
       email
     );
+    const scopes = Array.isArray(body.scopes) ? body.scopes.filter((s): s is string => typeof s === 'string') : [];
 
     return Response.json({
       valid: result.valid,
       staffName: result.staffName,
       error: result.error,
+      warnings: result.valid ? permissionWarnings(scopes, result.permissions) : [],
     });
   } catch {
     return Response.json({ valid: false, error: 'Invalid request' }, { status: 400 });
@@ -645,6 +721,11 @@ const oauthProvider = new OAuthProvider({
   tokenEndpoint: '/oauth/token',
   scopesSupported: AVAILABLE_SCOPES,
   refreshTokenTTL: 90 * 24 * 60 * 60, // 90 days (library default is 30)
+
+  // Every refresh re-reads the consenting agent, so this bounds how long a deactivated agent or
+  // a disabled API key keeps working. The callback gets no env, hence the module-level import.
+  accessTokenTTL: 60 * 60,
+  tokenExchangeCallback: (options) => revalidateOnRefresh(options, workerEnv as Env),
 
   // Clients identify themselves with a Client ID Metadata Document URL. Opt-in since
   // v0.3.0; requires the 'global_fetch_strictly_public' compatibility flag.

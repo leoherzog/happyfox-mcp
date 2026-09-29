@@ -4,11 +4,13 @@ import {
   MCPRequest,
   AuthContext,
   InsufficientScopeError,
+  CredentialsRejectedError,
   MCP_PROTOCOL_VERSION,
   META_SERVER_INFO,
   CACHE_TTL_MS_DISCOVER,
   CACHE_TTL_MS_STANDARD,
 } from "../../../src/types";
+import { HappyFoxAPIError } from "../../../src/happyfox/client";
 import packageJson from "../../../package.json";
 
 /**
@@ -121,6 +123,19 @@ describe("MCPServer", () => {
       expect((result.result?.instructions as string).length).toBeGreaterThan(0);
     });
 
+    it("names every resource and every tool family in the instructions", async () => {
+      const result = await server.handleRequest(req("server/discover"));
+      const instructions = result.result?.instructions as string;
+      const resources = (await server.handleRequest(req("resources/list"))).result?.resources as { uri: string }[];
+
+      for (const { uri } of resources) {
+        expect(instructions).toContain(uri);
+      }
+      for (const family of ["tickets", "contacts", "contact groups", "assets", "reports", "knowledge base", "ticket custom field choices"]) {
+        expect(instructions).toContain(family);
+      }
+    });
+
     it("carries the required caching hints", async () => {
       const result = await server.handleRequest(req("server/discover"));
 
@@ -224,6 +239,17 @@ describe("MCPServer", () => {
   });
 
   describe("handleToolCall", () => {
+    it("propagates CredentialsRejectedError instead of an isError result", async () => {
+      const rejected = new MCPServer(testAuthContext);
+      vi.spyOn((rejected as any).toolRegistry, "callToolWithAuth").mockRejectedValue(
+        new CredentialsRejectedError("Unauthorized")
+      );
+
+      await expect(
+        rejected.handleRequest(req("tools/call", { name: "happyfox_list_tickets", arguments: {} }))
+      ).rejects.toBeInstanceOf(CredentialsRejectedError);
+    });
+
     it("propagates InsufficientScopeError instead of an isError result", async () => {
       const readOnly = new MCPServer({ ...testAuthContext, scopes: ["happyfox:read"] });
 
@@ -432,9 +458,8 @@ describe("MCPServer", () => {
     it("returns a complete, privately-cacheable result on success", async () => {
       const okServer = new MCPServer(testAuthContext);
       vi.spyOn((okServer as any).resourceRegistry, "readResource").mockResolvedValue({
-        uri: "happyfox://categories",
-        mimeType: "application/json",
-        text: "[]"
+        content: { uri: "happyfox://categories", mimeType: "application/json", text: "[]" },
+        ttlMs: 900_000
       });
 
       const result = await okServer.handleRequest(
@@ -445,7 +470,7 @@ describe("MCPServer", () => {
       expect(result.result?.contents).toEqual([
         { uri: "happyfox://categories", mimeType: "application/json", text: "[]" }
       ]);
-      expect(result.result?.ttlMs).toBe(CACHE_TTL_MS_STANDARD);
+      expect(result.result?.ttlMs).toBe(900_000);
       expect(result.result?.cacheScope).toBe("private");
       expect(result.result?._meta?.[META_SERVER_INFO]).toEqual(SERVER_INFO);
     });
@@ -453,9 +478,8 @@ describe("MCPServer", () => {
     it("does not paginate (ReadResourceResult has no nextCursor)", async () => {
       const okServer = new MCPServer(testAuthContext);
       vi.spyOn((okServer as any).resourceRegistry, "readResource").mockResolvedValue({
-        uri: "happyfox://categories",
-        mimeType: "application/json",
-        text: "[]"
+        content: { uri: "happyfox://categories", mimeType: "application/json", text: "[]" },
+        ttlMs: 900_000
       });
 
       const result = await okServer.handleRequest(
@@ -463,6 +487,19 @@ describe("MCPServer", () => {
       );
 
       expect(result.result).not.toHaveProperty("nextCursor");
+    });
+
+    it("advertises what is left of the cached copy, not a fresh 15 minutes", async () => {
+      const agedServer = new MCPServer(testAuthContext);
+      vi.spyOn((agedServer as any).resourceRegistry, "readResource").mockResolvedValue({
+        content: { uri: "happyfox://statuses", mimeType: "application/json", text: "[]" },
+        ttlMs: 42_000
+      });
+
+      const result = await agedServer.handleRequest(req("resources/read", { uri: "happyfox://statuses" }));
+
+      expect(result.result?.ttlMs).toBe(42_000);
+      expect(result.result?.cacheScope).toBe("private");
     });
 
     it("propagates non-ResourceNotFoundError failures as internal errors", async () => {
@@ -477,6 +514,44 @@ describe("MCPServer", () => {
 
       expect(result.error?.code).toBe(-32603);
       expect(result.error?.data).toBe("upstream exploded");
+    });
+
+    it.each([
+      [429, "RATE_LIMIT_EXCEEDED", "HappyFox rate limit exceeded (HTTP 429)."],
+      [403, "API_ERROR", "Forbidden"],
+      [503, "API_ERROR", "HappyFox API error: 503 Service Unavailable"],
+      [200, "INVALID_RESPONSE", "HappyFox answered HTTP 200 with a non-JSON body"],
+      [0, "NETWORK_ERROR", "Request failed: fetch failed"],
+    ])("turns a HappyFox %i (%s) into a well-formed -32603 error", async (statusCode, code, message) => {
+      const errorServer = new MCPServer(testAuthContext);
+      vi.spyOn((errorServer as any).resourceRegistry, "readResource").mockRejectedValue(
+        new HappyFoxAPIError(message, statusCode, code)
+      );
+
+      const result = await errorServer.handleRequest(
+        req("resources/read", { uri: "happyfox://categories" })
+      );
+      // What the transport sends: JSON.stringify drops an Error's non-enumerable message.
+      const wire = JSON.parse(JSON.stringify(result));
+
+      expect(wire.error).toEqual({
+        code: -32603,
+        message: `Could not read happyfox://categories from HappyFox: ${message}`,
+        data: { uri: "happyfox://categories", statusCode, errorCode: code }
+      });
+      expect(wire.id).toBe(1);
+      expect(wire.result).toBeUndefined();
+    });
+
+    it("propagates a HappyFox 401 as CredentialsRejectedError for the transport", async () => {
+      const errorServer = new MCPServer(testAuthContext);
+      vi.spyOn((errorServer as any).resourceRegistry, "readResource").mockRejectedValue(
+        new HappyFoxAPIError("Unauthorized", 401, "API_ERROR")
+      );
+
+      await expect(
+        errorServer.handleRequest(req("resources/read", { uri: "happyfox://categories" }))
+      ).rejects.toBeInstanceOf(CredentialsRejectedError);
     });
   });
 
@@ -514,6 +589,29 @@ describe("MCPServer", () => {
       expect(result.error?.code).toBe(-32603);
       expect(result.error?.message).toBe("Internal error");
       expect(result.error?.data).toBe("Internal server error");
+    });
+
+    it("never passes an Error instance through as the JSON-RPC error, even with code and message", async () => {
+      const errorServer = new MCPServer(testAuthContext);
+      vi.spyOn(errorServer as any, "handleDiscover").mockImplementation(() => {
+        throw new HappyFoxAPIError("Unauthorized", 401, "API_ERROR");
+      });
+
+      const wire = JSON.parse(JSON.stringify(await errorServer.handleRequest(req("server/discover"))));
+
+      expect(wire.error).toEqual({ code: -32603, message: "Internal error", data: "Unauthorized" });
+    });
+
+    it("never passes through an object whose code is not a number", async () => {
+      const errorServer = new MCPServer(testAuthContext);
+      vi.spyOn(errorServer as any, "handleDiscover").mockImplementation(() => {
+        throw { code: "API_ERROR", message: "Unauthorized" };
+      });
+
+      const result = await errorServer.handleRequest(req("server/discover"));
+
+      expect(result.error?.code).toBe(-32603);
+      expect(result.error?.message).toBe("Internal error");
     });
 
     it("handles non-Error objects thrown as internal errors", async () => {
@@ -558,9 +656,8 @@ describe("MCPServer", () => {
       const okServer = new MCPServer(testAuthContext);
       vi.spyOn((okServer as any).toolRegistry, "callToolWithAuth").mockResolvedValue("ok");
       vi.spyOn((okServer as any).resourceRegistry, "readResource").mockResolvedValue({
-        uri: "happyfox://categories",
-        mimeType: "application/json",
-        text: "[]"
+        content: { uri: "happyfox://categories", mimeType: "application/json", text: "[]" },
+        ttlMs: 900_000
       });
 
       const requests = [

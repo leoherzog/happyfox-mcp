@@ -8,6 +8,7 @@ import {
   ToolExecutionError,
   ResourceNotFoundError,
   InsufficientScopeError,
+  CredentialsRejectedError,
   METHOD_NOT_FOUND,
   INVALID_PARAMS,
   INTERNAL_ERROR,
@@ -24,8 +25,20 @@ import {
   type ReadResourceResult,
   type CallToolResult,
 } from '../types';
+import { HappyFoxAPIError } from '../happyfox/client';
 import { ToolRegistry } from './tools/registry';
 import { ResourceRegistry } from './resources/registry';
+
+/** Failures the transport answers with HTTP 401/403 and a Bearer challenge, so they must escape this layer. */
+function isTransportError(error: unknown): boolean {
+  return error instanceof InsufficientScopeError || error instanceof CredentialsRejectedError;
+}
+
+/** A JSON-RPC error object from createError. An Error instance never qualifies, whatever its fields. */
+function isMCPError(value: unknown): value is MCPError {
+  return typeof value === 'object' && value !== null && !(value instanceof Error) &&
+    typeof (value as MCPError).code === 'number' && typeof (value as MCPError).message === 'string';
+}
 
 /**
  * MCP 2026-07-28 protocol layer: stateless, no handshake, no sessions.
@@ -68,16 +81,15 @@ export class MCPServer {
           throw this.createError(METHOD_NOT_FOUND, `Method not found: ${request.method}`);
       }
     } catch (error) {
-      // Scope failures are the transport's to report (HTTP 403 + challenge).
-      if (error instanceof InsufficientScopeError) {
+      if (isTransportError(error)) {
         throw error;
       }
 
       // id is always readable here - the transport already rejected malformed envelopes.
-      if (error && typeof error === 'object' && 'code' in error && 'message' in error) {
+      if (isMCPError(error)) {
         return {
           jsonrpc: '2.0',
-          error: error as MCPError,
+          error,
           id: request.id
         };
       }
@@ -196,8 +208,7 @@ export class MCPServer {
         ]
       });
     } catch (error) {
-      // A scope failure is the transport's to report (HTTP 403 + challenge).
-      if (error instanceof InsufficientScopeError) {
+      if (isTransportError(error)) {
         throw error;
       }
 
@@ -276,18 +287,29 @@ export class MCPServer {
     }
 
     try {
-      const content = await this.resourceRegistry.readResource(
+      const { content, ttlMs } = await this.resourceRegistry.readResource(
         uri as string,
         this.authContext.credentials
       );
+      // ttlMs is what is left of the cached copy, so a client never holds data past the server's bound.
       return this.success<ReadResourceResult>(request, {
         contents: [content],
-        ttlMs: CACHE_TTL_MS_STANDARD,
+        ttlMs,
         cacheScope: 'private'
       });
     } catch (error) {
       if (error instanceof ResourceNotFoundError) {
         throw this.createError(INVALID_PARAMS, error.message, { uri });
+      }
+      if (error instanceof HappyFoxAPIError) {
+        if (error.statusCode === 401) {
+          throw new CredentialsRejectedError(error.message);
+        }
+        throw this.createError(INTERNAL_ERROR, `Could not read ${uri} from HappyFox: ${error.message}`, {
+          uri,
+          statusCode: error.statusCode,
+          errorCode: error.code
+        });
       }
       throw error;
     }

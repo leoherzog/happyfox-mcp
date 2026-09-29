@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { McpApiHandler } from "../../../src/index";
 import { CredentialStore } from "../../../src/oauth/services/credential-store";
 import { CREDENTIAL_TTL_SECONDS } from "../../../src/oauth/types";
 import { fetchMock } from "../../helpers/fetch-mock";
+import { resetFetchMock, mockHappyFoxGet, mockRateLimitResponse } from "../../helpers/fetch-mock-helpers";
 import {
   MCP_PROTOCOL_VERSION,
   createRequest,
@@ -796,6 +797,166 @@ describe("McpApiHandler - MCP 2026-07-28 transport", () => {
 
       const code = (await jsonBody(response)).error.code as number;
       expect([-32000, -32001, -32002]).not.toContain(code);
+    });
+  });
+
+  describe("HappyFox rejects the stored credentials", () => {
+    const store = new CredentialStore(env.OAUTH_KV, env.CREDENTIAL_ENCRYPTION_KEY);
+    let seeded = 0;
+
+    /** A grant of its own with an API key no other test caches data under. */
+    async function seedGrant(): Promise<string> {
+      seeded++;
+      const tokenId = `rejected-token-${seeded}`;
+      await store.store(tokenId, {
+        apiKey: `rejected-api-key-${seeded}`,
+        authCode: "test-auth-code",
+        accountName: "testaccount",
+        region: "us",
+        staffId: 1,
+        staffName: "Test Staff",
+        staffEmail: "test@example.com",
+        expiresAt: Math.floor(Date.now() / 1000) + CREDENTIAL_TTL_SECONDS,
+      });
+      return tokenId;
+    }
+
+    function fakeOAuthProvider() {
+      return {
+        listUserGrants: vi.fn().mockResolvedValue({ items: [{ id: "grant-1" }] }),
+        revokeGrant: vi.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    function sendAs(
+      tokenId: string,
+      method: string,
+      params: Record<string, unknown>,
+      oauthProvider?: ReturnType<typeof fakeOAuthProvider>,
+      extraHeaders: Record<string, string> = {}
+    ): Promise<Response> {
+      return new McpApiHandler().fetch(
+        post(createRequest(method, params), { ...createMCPHeaders(method, params), ...extraHeaders }),
+        { ...env, OAUTH_PROVIDER: oauthProvider },
+        { ...testCtx, props: { ...testCtx.props, tokenId } } as any
+      );
+    }
+
+    beforeEach(() => {
+      resetFetchMock();
+    });
+
+    it.each([
+      ["tools/call", { name: "happyfox_get_ticket", arguments: { ticket_id: "7" } }, "/ticket/7/"],
+      ["resources/read", { uri: "happyfox://categories" }, "/categories/"],
+    ])("answers %s with 401 invalid_token and ends the grant on a HappyFox 401", async (method, params, path) => {
+      const tokenId = await seedGrant();
+      const oauthProvider = fakeOAuthProvider();
+      mockHappyFoxGet(path, { error: "Unauthorized" }, 401);
+
+      const response = await sendAs(tokenId, method, params, oauthProvider);
+
+      expect(response.status).toBe(401);
+      const challenge = response.headers.get("WWW-Authenticate") ?? "";
+      expect(challenge).toMatch(/^Bearer /);
+      expect(challenge).toContain('error="invalid_token"');
+      expect(challenge).toContain(
+        'resource_metadata="https://worker.test/.well-known/oauth-protected-resource/mcp"'
+      );
+      const json = await jsonBody(response);
+      expect(json.id).toBe(1);
+      expect(json.error.code).toBe(401);
+      expect(json.error.message).toContain("HappyFox rejected the stored API key and auth code");
+      expect(json.result).toBeUndefined();
+
+      expect(await store.retrieve(tokenId)).toBeNull();
+      expect(oauthProvider.listUserGrants).toHaveBeenCalledWith(tokenId);
+      expect(oauthProvider.revokeGrant).toHaveBeenCalledWith("grant-1", tokenId);
+    });
+
+    it("answers the token's next request at step 26, before any HappyFox call", async () => {
+      const tokenId = await seedGrant();
+      mockHappyFoxGet("/ticket/7/", { error: "Unauthorized" }, 401);
+      await sendAs(tokenId, "tools/call", { name: "happyfox_get_ticket", arguments: { ticket_id: "7" } }, fakeOAuthProvider());
+
+      const response = await sendAs(tokenId, "tools/list", {});
+
+      expect(response.status).toBe(401);
+      expect((await jsonBody(response)).error.message).toContain("missing or expired");
+      expect(fetchMock.requests()).toHaveLength(1);
+    });
+
+    it("still deletes the credentials when no OAuth helpers are bound", async () => {
+      const tokenId = await seedGrant();
+      mockHappyFoxGet("/ticket/7/", { error: "Unauthorized" }, 401);
+
+      const response = await sendAs(tokenId, "tools/call", { name: "happyfox_get_ticket", arguments: { ticket_id: "7" } });
+
+      expect(response.status).toBe(401);
+      expect(await store.retrieve(tokenId)).toBeNull();
+    });
+
+    it("still answers 401 when revoking the grant fails", async () => {
+      const tokenId = await seedGrant();
+      const oauthProvider = fakeOAuthProvider();
+      oauthProvider.listUserGrants.mockRejectedValue(new Error("KV unavailable"));
+      mockHappyFoxGet("/ticket/7/", { error: "Unauthorized" }, 401);
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await sendAs(tokenId, "tools/call", { name: "happyfox_get_ticket", arguments: { ticket_id: "7" } }, oauthProvider);
+
+      expect(response.status).toBe(401);
+      expect(await store.retrieve(tokenId)).toBeNull();
+      error.mockRestore();
+    });
+
+    it("keeps CORS headers on the 401 so a browser client can read the challenge", async () => {
+      const tokenId = await seedGrant();
+      mockHappyFoxGet("/ticket/7/", { error: "Unauthorized" }, 401);
+
+      const response = await sendAs(
+        tokenId,
+        "tools/call",
+        { name: "happyfox_get_ticket", arguments: { ticket_id: "7" } },
+        fakeOAuthProvider(),
+        { Origin: "http://localhost:3000" }
+      );
+
+      expect(response.status).toBe(401);
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBe("http://localhost:3000");
+      expect(response.headers.get("Access-Control-Expose-Headers")).toBe("WWW-Authenticate");
+    });
+
+    it("keeps a HappyFox 403 an isError tool result and the grant intact", async () => {
+      const tokenId = await seedGrant();
+      const oauthProvider = fakeOAuthProvider();
+      mockHappyFoxGet("/ticket/7/", { error: "Permission denied" }, 403);
+
+      const response = await sendAs(tokenId, "tools/call", { name: "happyfox_get_ticket", arguments: { ticket_id: "7" } }, oauthProvider);
+
+      expect(response.status).toBe(200);
+      const json = await jsonBody(response);
+      expect(json.result.isError).toBe(true);
+      expect(json.result._meta.statusCode).toBe(403);
+      expect(await store.retrieve(tokenId)).not.toBeNull();
+      expect(oauthProvider.revokeGrant).not.toHaveBeenCalled();
+    });
+
+    it("answers a resources/read rate-limit lockout with a well-formed -32603 and keeps the grant", async () => {
+      const tokenId = await seedGrant();
+      const oauthProvider = fakeOAuthProvider();
+      mockRateLimitResponse("/categories/", "GET", "us", { "Retry-After": "600" });
+
+      const response = await sendAs(tokenId, "resources/read", { uri: "happyfox://categories" }, oauthProvider);
+
+      expect(response.status).toBe(200);
+      const json = await jsonBody(response);
+      expect(json.error.code).toBe(-32603);
+      expect(typeof json.error.message).toBe("string");
+      expect(json.error.message).toContain("rate limit");
+      expect(json.error.data).toEqual({ uri: "happyfox://categories", statusCode: 429, errorCode: "RATE_LIMIT_EXCEEDED" });
+      expect(await store.retrieve(tokenId)).not.toBeNull();
+      expect(oauthProvider.revokeGrant).not.toHaveBeenCalled();
     });
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { CredentialStore, decodeEncryptionKey } from '../../../../src/oauth/services/credential-store';
+import { CredentialStore, decodeEncryptionKey, storedAuth } from '../../../../src/oauth/services/credential-store';
 import { StoredCredentials, CREDENTIAL_TTL_SECONDS } from '../../../../src/oauth/types';
 import { env } from 'cloudflare:workers';
 
@@ -71,6 +71,15 @@ describe('CredentialStore', () => {
       expect(retrieved?.staffId).toBe(42);
       expect(retrieved?.staffName).toBe('John Doe');
       expect(retrieved?.staffEmail).toBe('john@example.com');
+    });
+
+    it('keeps a custom API host encrypted with the rest of the record', async () => {
+      const credentials = createTestCredentials({ apiHost: 'support.example.com' });
+      await store.store('custom-host-token', credentials);
+
+      const raw = await kv.get('cred:custom-host-token');
+      expect(raw).not.toContain('support.example.com');
+      expect((await store.retrieve('custom-host-token'))?.apiHost).toBe('support.example.com');
     });
 
     it('returns null for non-existent token', async () => {
@@ -254,5 +263,29 @@ describe('decodeEncryptionKey', () => {
     expect(decodeEncryptionKey('')).toBeNull();
     expect(decodeEncryptionKey('not-valid-base64!!!')).toBeNull();
     expect(decodeEncryptionKey(btoa('short-16-byte-key'))).toBeNull();
+  });
+});
+
+describe('storedAuth', () => {
+  it('maps a record without apiHost to the account subdomain', () => {
+    const auth = storedAuth(createTestCredentials());
+
+    expect(auth).toEqual({ apiKey: 'test-api-key', authCode: 'test-auth-code', accountName: 'testaccount', region: 'us' });
+    expect(auth).not.toHaveProperty('apiHost');
+  });
+
+  it('carries a stored custom API host', () => {
+    expect(storedAuth(createTestCredentials({ apiHost: 'support.example.com' })).apiHost).toBe('support.example.com');
+  });
+
+  it.each([
+    [{ region: 'us/../eu' as any }],
+    [{ region: '../eu/victim/staff#' as any }],
+    [{ accountName: 'acme/../victim' }],
+    [{ apiHost: 'https://support.example.com' }],
+    [{ apiHost: '127.0.0.1' }],
+    [{ apiHost: null as any }],
+  ])('throws for a record consent would reject: %j', (overrides) => {
+    expect(() => storedAuth(createTestCredentials(overrides))).toThrow('invalid HappyFox account');
   });
 });

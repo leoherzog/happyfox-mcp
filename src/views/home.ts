@@ -52,7 +52,8 @@ export function renderHomePage(origin: string): string {
       <p>
         A <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">Model Context Protocol</a>
         server that lets AI assistants work with your HappyFox helpdesk &mdash;
-        tickets, contacts, and assets &mdash; using your own HappyFox credentials.
+        tickets, contacts, assets, reports and the knowledge base &mdash; using your own HappyFox
+        credentials.
       </p>
       <code class="endpoint">${base}/mcp</code>
     </header>
@@ -84,14 +85,18 @@ export function renderHomePage(origin: string): string {
       <h2>What you'll need</h2>
       <ul>
         <li><strong>Account subdomain</strong> &mdash; the <code>yourcompany</code> in <code>yourcompany.happyfox.com</code>.</li>
-        <li><strong>API key and auth code</strong> &mdash; generated in HappyFox.
+        <li><strong>API key and auth code</strong> &mdash; created in HappyFox under Apps &rarr; Goodies &rarr; API.
           <a href="${HAPPYFOX_API_KEY_DOCS}" target="_blank" rel="noopener">See HappyFox's guide</a>.</li>
-        <li><strong>Your staff email</strong> &mdash; used to look up your agent ID, so replies and
-          notes are attributed to you.</li>
+        <li><strong>Your staff email</strong> &mdash; the email of an active agent. Its agent ID becomes
+          the default for replies, notes and other actions HappyFox attributes to an agent.</li>
         <li><strong>Region</strong> &mdash; US (<code>.com</code>) or EU (<code>.net</code>) hosting.</li>
+        <li><strong>Custom domain</strong> (optional) &mdash; if your account uses one, HappyFox requires
+          API calls to go to that domain, so enter its host name, such as <code>support.yourcompany.com</code>.</li>
       </ul>
       <p class="muted">
-        Everything the assistant can do is limited by your own HappyFox permissions.
+        The API key and auth code open the whole HappyFox account, not just your own work. Your agent ID
+        is a default attribution, not a permission boundary: the assistant may name another agent's ID
+        for a call, and HappyFox then applies that agent's role. Grant only the scopes you need.
       </p>
     </section>
 
@@ -105,6 +110,12 @@ export function renderHomePage(origin: string): string {
         <tbody>${scopeRows}
         </tbody>
       </table>
+      <p class="muted">
+        HappyFox also checks the acting agent's role. Moving tickets to another category needs a move
+        permission, deleting assets needs an active agent with Manage Assets, and creating contacts along
+        with an asset needs Manage all Contacts. The consent screen warns when you request
+        <code>happyfox:admin</code> and your role lacks the move or Manage Assets permission.
+      </p>
     </section>
 
     <section>
@@ -116,13 +127,20 @@ export function renderHomePage(origin: string): string {
         <li><strong>Contacts &amp; groups</strong>: search and read, create, update, manage group
           membership.</li>
         <li><strong>Assets</strong>: search and read, create, update, delete, inspect custom fields.</li>
+        <li><strong>Reports</strong>: read a saved report's summary, tabular view, response, staff,
+          contact and SLA statistics, with optional period filters.</li>
+        <li><strong>Knowledge base</strong>: read one article or section.</li>
+        <li><strong>Ticket custom fields</strong>: replace a dropdown field's choices account-wide.</li>
       </ul>
       <p><strong>Resources</strong> &mdash; read-only reference data your client can load directly:</p>
       <ul>
         <li><code>happyfox://categories</code>, <code>happyfox://statuses</code>,
-          <code>happyfox://staff</code>, <code>happyfox://contact-groups</code>,
+          <code>happyfox://priorities</code>, <code>happyfox://staff</code>,
+          <code>happyfox://contact-groups</code>,
           <code>happyfox://asset-types</code>, <code>happyfox://ticket-custom-fields</code>,
-          <code>happyfox://contact-custom-fields</code></li>
+          <code>happyfox://contact-custom-fields</code>, <code>happyfox://reports</code></li>
+        <li>Knowledge base exports: <code>happyfox://kb-articles</code>,
+          <code>happyfox://kb-internal-articles</code>, <code>happyfox://kb-sections</code></li>
       </ul>
       <p class="muted">File attachments are not supported.</p>
     </section>
@@ -155,9 +173,13 @@ export function renderHomePage(origin: string): string {
         <li>Your API key and auth code are encrypted (AES-256-GCM) and stored only for the life of
           your authorization.</li>
         <li>Requests go straight to your HappyFox account; ticket data is not stored here. Reference
-          data such as categories and statuses is cached briefly to reduce API calls.</li>
-        <li>Revoke access at any time by deleting the connector in your MCP client or rotating your
-          HappyFox API key.</li>
+          data such as categories and statuses is cached for up to 15 minutes to reduce API calls.</li>
+        <li>Each time your client refreshes its access token, about hourly, the connection is checked
+          against HappyFox. It ends if the key stops working or your agent is deactivated or deleted, and
+          at once if HappyFox rejects the key during a request.</li>
+        <li>To stop using the connector, remove it from your MCP client. To cut off the key itself,
+          turn off the toggle in its edit slider under Apps &rarr; Goodies &rarr; API in
+          HappyFox. That stops every integration using the key, so give this connector a key of its own.</li>
       </ul>
     </section>
 

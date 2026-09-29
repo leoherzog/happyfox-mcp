@@ -49,6 +49,8 @@ export function renderConsentPage(data: ConsentPageData): string {
     .client-header { text-align: center; margin-bottom: 2rem; }
     .scope-list { margin: 1rem 0; padding-left: 1.5rem; }
     .scope-list li { margin: 0.5rem 0; }
+    .scope-note { font-size: 0.875rem; }
+    #permission-warnings { margin: 0.25rem 0 0; padding-left: 1.25rem; font-size: 0.875rem; color: var(--pico-del-color); }
     .form-footer { text-align: center; margin-top: 1rem; }
     .security-note { text-align: center; font-size: 0.875rem; opacity: 0.8; margin-top: 2rem; }
   </style>
@@ -72,9 +74,19 @@ export function renderConsentPage(data: ConsentPageData): string {
         <ul class="scope-list">
           ${scopeList}
         </ul>
+        <p class="scope-note">
+          The API key and auth code open the whole HappyFox account, not just your own work.
+          Your staff ID is the default agent for replies, notes and other attributed actions; the
+          assistant may name another agent's ID instead, so it does not limit what the key can do.
+        </p>
+        <p class="scope-note">
+          HappyFox still checks the acting agent's role: moving tickets to another category needs a
+          move permission, deleting assets needs Manage Assets, and creating contacts with an asset
+          needs Manage all Contacts.
+        </p>
       </section>
 
-      <form method="POST">${data.csrfToken ? `
+      <form method="POST" data-scopes="${escapeHtml(data.requestedScopes.join(' '))}">${data.csrfToken ? `
         <input type="hidden" name="csrf_token" value="${escapeHtml(data.csrfToken)}">` : ''}
         <fieldset>
           <label>
@@ -89,7 +101,21 @@ export function renderConsentPage(data: ConsentPageData): string {
               aria-describedby="account-helper"
             >
           </label>
-          <small id="account-helper">Your HappyFox URL: https://<strong>subdomain</strong>.happyfox.com</small>
+          <small id="account-helper">Your HappyFox URL: https://<strong>subdomain</strong>.happyfox.com, or .happyfox.net for EU-hosted accounts</small>
+
+          <label>
+            Custom Domain (optional)
+            <input
+              type="text"
+              name="api_host"
+              placeholder="support.example.com"
+              value="${escapeHtml(data.formData?.apiHost || '')}"
+              autocomplete="off"
+              spellcheck="false"
+              aria-describedby="host-helper"
+            >
+          </label>
+          <small id="host-helper">Only if your HappyFox account uses a custom domain. Enter the host name alone; API requests then go to that domain instead of the subdomain.</small>
 
           <label>
             API Key
@@ -127,7 +153,7 @@ export function renderConsentPage(data: ConsentPageData): string {
               aria-describedby="email-helper"
             >
           </label>
-          <small id="email-helper">Must match your email in HappyFox staff settings</small>
+          <small id="email-helper">Must match your email in HappyFox staff settings. The agent must be active.</small>
         </fieldset>
 
         <fieldset>
@@ -172,12 +198,30 @@ export function renderConsentPage(data: ConsentPageData): string {
   var accountInput = form.querySelector('input[name="account_name"]');
   var apiKeyInput = form.querySelector('input[name="api_key"]');
   var authCodeInput = form.querySelector('input[name="auth_code"]');
+  var apiHostInput = form.querySelector('input[name="api_host"]');
+  var csrfInput = form.querySelector('input[name="csrf_token"]');
   var emailHelper = document.getElementById('email-helper');
+  var scopes = (form.getAttribute('data-scopes') || '').split(' ').filter(Boolean);
 
   var status = document.createElement('span');
   status.id = 'email-status';
   status.style.cssText = 'display:block;margin-top:0.25rem;font-size:0.875rem';
   emailHelper.parentNode.insertBefore(status, emailHelper.nextSibling);
+
+  var warningList = document.createElement('ul');
+  warningList.id = 'permission-warnings';
+  warningList.hidden = true;
+  status.parentNode.insertBefore(warningList, status.nextSibling);
+
+  function showWarnings(warnings) {
+    warningList.textContent = '';
+    (warnings || []).forEach(function(text) {
+      var item = document.createElement('li');
+      item.textContent = text;
+      warningList.appendChild(item);
+    });
+    warningList.hidden = warningList.childNodes.length === 0;
+  }
 
   emailInput.addEventListener('blur', function() {
     var email = emailInput.value.trim();
@@ -187,6 +231,7 @@ export function renderConsentPage(data: ConsentPageData): string {
     var regionEl = form.querySelector('input[name="region"]:checked');
     var region = regionEl ? regionEl.value : 'us';
 
+    showWarnings([]);
     if (!email || !accountName || !apiKey || !authCode) {
       status.textContent = '';
       emailInput.removeAttribute('aria-invalid');
@@ -198,8 +243,11 @@ export function renderConsentPage(data: ConsentPageData): string {
 
     fetch('/api/validate-staff', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accountName: accountName, apiKey: apiKey, authCode: authCode, region: region, email: email })
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfInput ? csrfInput.value : '' },
+      body: JSON.stringify({
+        accountName: accountName, apiKey: apiKey, authCode: authCode, region: region,
+        apiHost: apiHostInput.value.trim(), email: email, scopes: scopes
+      })
     })
     .then(function(res) { return res.json(); })
     .then(function(data) {
@@ -207,6 +255,7 @@ export function renderConsentPage(data: ConsentPageData): string {
         status.innerHTML = '\\u2713 Found: <strong>' + escapeHtmlJs(data.staffName) + '</strong>';
         status.style.color = 'var(--pico-ins-color)';
         emailInput.setAttribute('aria-invalid', 'false');
+        showWarnings(data.warnings);
       } else {
         status.textContent = '\\u2717 ' + data.error;
         status.style.color = 'var(--pico-del-color)';

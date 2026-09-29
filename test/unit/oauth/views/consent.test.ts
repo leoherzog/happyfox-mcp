@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderConsentPage, renderErrorPage } from '../../../../src/oauth/views/consent';
-import { ConsentPageData } from '../../../../src/oauth/types';
+import { ConsentPageData, SCOPE_DESCRIPTIONS, AVAILABLE_SCOPES } from '../../../../src/oauth/types';
 
 // Note: escapeHtml is not exported, but we test it indirectly through renderConsentPage/renderErrorPage
 
@@ -137,7 +137,13 @@ describe('renderConsentPage', () => {
 
     it('omits CSRF field when token not provided', () => {
       const html = renderConsentPage(baseData);
-      expect(html).not.toContain('name="csrf_token"');
+      expect(html).not.toContain('<input type="hidden" name="csrf_token"');
+    });
+
+    it('sends the token with the live email check', () => {
+      const html = renderConsentPage({ ...baseData, csrfToken: 'test-csrf-token-123' });
+      expect(html).toContain(`'X-CSRF-Token': csrfInput ? csrfInput.value : ''`);
+      expect(html).toContain(`form.querySelector('input[name="csrf_token"]')`);
     });
 
     it('escapes HTML in CSRF token', () => {
@@ -263,7 +269,7 @@ describe('renderConsentPage', () => {
   describe('scope rendering', () => {
     it('renders single scope with description', () => {
       const html = renderConsentPage(baseData);
-      expect(html).toContain('Read tickets, contacts, and assets');
+      expect(html).toContain(SCOPE_DESCRIPTIONS['happyfox:read']);
     });
 
     it('renders multiple scopes', () => {
@@ -272,9 +278,45 @@ describe('renderConsentPage', () => {
         requestedScopes: ['happyfox:read', 'happyfox:write', 'happyfox:admin'],
       };
       const html = renderConsentPage(data);
-      expect(html).toContain('Read tickets, contacts, and assets');
-      expect(html).toContain('Create and update tickets, add replies');
-      expect(html).toContain('Delete tickets, manage categories');
+      for (const scope of AVAILABLE_SCOPES) {
+        expect(html).toContain(SCOPE_DESCRIPTIONS[scope]);
+      }
+    });
+
+    it('describes the admin scope by the tools it gates, not HappyFox category management', () => {
+      expect(SCOPE_DESCRIPTIONS['happyfox:admin']).toBe(
+        'Delete tickets and assets, move tickets to another category, and replace the choices of ticket custom fields account-wide'
+      );
+      expect(SCOPE_DESCRIPTIONS['happyfox:admin']).not.toContain('manage categories');
+    });
+
+    it('names contact, contact group and asset writes under the write scope', () => {
+      for (const noun of ['contacts', 'contact groups', 'assets', 'private notes']) {
+        expect(SCOPE_DESCRIPTIONS['happyfox:write']).toContain(noun);
+      }
+    });
+
+    it('states that the key is account-wide and the staff ID only a default', () => {
+      const html = renderConsentPage(baseData);
+      expect(html).toContain('open the whole HappyFox account');
+      expect(html).toContain('default agent');
+      expect(html).toContain("does not limit what the key can do");
+    });
+
+    it('names the HappyFox role permissions the docs require', () => {
+      const html = renderConsentPage(baseData);
+      expect(html).toContain('Manage Assets');
+      expect(html).toContain('Manage all Contacts');
+      expect(html).toContain('move permission');
+    });
+
+    it('hands the requested scopes to the staff check for permission warnings', () => {
+      const html = renderConsentPage({ ...baseData, requestedScopes: ['happyfox:read', 'happyfox:admin'] });
+      expect(html).toContain('data-scopes="happyfox:read happyfox:admin"');
+      expect(html).toContain('scopes: scopes');
+      expect(html).toContain('showWarnings(data.warnings)');
+      // Warning text is inserted as text, never as markup.
+      expect(html).toContain('item.textContent = text');
     });
 
     it('renders unknown scope as-is', () => {
@@ -293,6 +335,25 @@ describe('renderConsentPage', () => {
       };
       const html = renderConsentPage(data);
       expect(html).toContain('&lt;script&gt;xss&lt;/script&gt;');
+    });
+  });
+
+  describe('custom domain', () => {
+    it('offers an optional api_host field', () => {
+      const html = renderConsentPage(baseData);
+      const field = html.match(/<input[^>]*name="api_host"[^>]*>/)?.[0] ?? '';
+      expect(field).not.toBe('');
+      expect(field).not.toContain('required');
+    });
+
+    it('sends the custom domain with the staff check', () => {
+      expect(renderConsentPage(baseData)).toContain('apiHost: apiHostInput.value.trim()');
+    });
+
+    it('repopulates and escapes the entered custom domain', () => {
+      const html = renderConsentPage({ ...baseData, formData: { apiHost: '"><script>alert(1)</script>' } });
+      expect(html).not.toContain('"><script>alert(1)</script>');
+      expect(html).toContain('value="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"');
     });
   });
 

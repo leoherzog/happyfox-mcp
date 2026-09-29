@@ -5,6 +5,8 @@
  * Uses AES-256-GCM encryption with random IV for each credential.
  */
 
+import { HappyFoxAuth } from '../../types';
+import { isValidAccount } from '../../happyfox/host';
 import { StoredCredentials } from '../types';
 
 // KV key prefix for credentials
@@ -160,6 +162,25 @@ export class CredentialStore {
     const decoder = new TextDecoder();
     return decoder.decode(plaintextBytes);
   }
+}
+
+/**
+ * The HappyFox credentials of a stored grant. A record with no `apiHost` uses the
+ * account subdomain.
+ * @throws Error when the record names a region, account or host that consent would reject
+ */
+export function storedAuth(stored: StoredCredentials): HappyFoxAuth {
+  const auth: HappyFoxAuth = {
+    apiKey: stored.apiKey,
+    authCode: stored.authCode,
+    accountName: stored.accountName,
+    region: stored.region,
+    ...(stored.apiHost !== undefined && { apiHost: stored.apiHost }),
+  };
+  if (!isValidAccount(auth)) {
+    throw new Error('Stored credentials name an invalid HappyFox account');
+  }
+  return auth;
 }
 
 /**
