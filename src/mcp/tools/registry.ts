@@ -1,8 +1,19 @@
-import { MCPTool, HappyFoxAuth, AuthContext, ToolNotFoundError, ToolExecutionError, InsufficientScopeError } from '../../types';
+import {
+  MCPTool,
+  HappyFoxAuth,
+  AuthContext,
+  ToolNotFoundError,
+  ToolExecutionError,
+  InsufficientScopeError,
+  CredentialsRejectedError,
+} from '../../types';
 import { HappyFoxAPIError } from '../../happyfox/client';
 import { TicketTools } from './tickets';
 import { ContactTools } from './contacts';
 import { AssetTools } from './assets';
+import { ReportTools } from './reports';
+import { KnowledgeBaseTools } from './knowledge-base';
+import { TicketFieldChoiceTools } from './ticket-field-choices';
 import {
   filterToolsByScopes,
   injectStaffId,
@@ -20,6 +31,9 @@ export class ToolRegistry {
     this.registerToolModule(new TicketTools());
     this.registerToolModule(new ContactTools());
     this.registerToolModule(new AssetTools());
+    this.registerToolModule(new ReportTools());
+    this.registerToolModule(new KnowledgeBaseTools());
+    this.registerToolModule(new TicketFieldChoiceTools());
   }
 
   private registerToolModule(module: any) {
@@ -35,7 +49,10 @@ export class ToolRegistry {
     return filterToolsByScopes(Array.from(this.tools.values()), scopes);
   }
 
-  /** Call a tool with scope enforcement and staff_id injection. */
+  /**
+   * Call a tool with scope enforcement and staff_id injection.
+   * @throws CredentialsRejectedError when HappyFox answers 401; every other failure is a ToolExecutionError
+   */
   async callToolWithAuth(name: string, args: any, authContext: AuthContext): Promise<any> {
     const handler = this.toolHandlers.get(name);
     if (!handler) {
@@ -58,6 +75,11 @@ export class ToolRegistry {
       return await handler(enrichedArgs, authContext.credentials);
     } catch (error) {
       if (error instanceof HappyFoxAPIError) {
+        // 401 means the stored key no longer works, so the client must re-authorize. A 403 can be the
+        // agent's role, which re-consent would not fix, so it stays a tool result.
+        if (error.statusCode === 401) {
+          throw new CredentialsRejectedError(error.message);
+        }
         throw new ToolExecutionError(error.message, error.statusCode, error.code);
       }
       throw new ToolExecutionError(error instanceof Error ? error.message : String(error));
