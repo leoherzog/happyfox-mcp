@@ -84,7 +84,10 @@ export const META_SERVER_INFO = 'io.modelcontextprotocol/serverInfo';
 
 /** server/discover: identical for every caller. */
 export const CACHE_TTL_MS_DISCOVER = 3_600_000;
-/** tools/list, resources/list, resources/read: matches the 15-minute reference cache. */
+/**
+ * tools/list and resources/list. resources/read instead reports the remaining lifetime of the
+ * reference-cache entry it served.
+ */
 export const CACHE_TTL_MS_STANDARD = 900_000;
 
 // ---------------------------------------------------------------------------
@@ -97,12 +100,19 @@ export const SERVER_INFO: Implementation = {
   version: packageJson.version,
 };
 
-/** Optional natural-language guidance returned by server/discover. */
+/** Optional natural-language guidance returned by server/discover; names every resource URI. */
 export const SERVER_INSTRUCTIONS =
-  'HappyFox helpdesk adapter. Call tools/list to see the tools the caller\'s OAuth scopes ' +
-  'grant, and resources/list for cached HappyFox reference data (categories, statuses, ' +
-  'priorities, staff). This server is stateless: every request must carry its own ' +
-  'MCP-Protocol-Version, Mcp-Method and params._meta.';
+  'HappyFox helpdesk adapter. Tools cover tickets, contacts and contact groups, assets, saved ' +
+  'reports, the knowledge base and ticket custom field choices; tools/list shows the ones the ' +
+  'caller\'s OAuth scopes grant. Resources need happyfox:read. Most hold the HappyFox reference ' +
+  'data whose numeric ids the tools take: happyfox://categories, happyfox://statuses, ' +
+  'happyfox://priorities, happyfox://staff, happyfox://ticket-custom-fields, ' +
+  'happyfox://contact-custom-fields, happyfox://contact-groups, happyfox://asset-types and ' +
+  'happyfox://reports. happyfox://kb-articles, happyfox://kb-internal-articles and ' +
+  'happyfox://kb-sections export the knowledge base. ' +
+  'Resources are cached: ticket custom fields for up to 1 minute, the rest for up to 15 minutes. ' +
+  'This server is stateless: every request must carry its own MCP-Protocol-Version, Mcp-Method ' +
+  'and params._meta.';
 
 // ---------------------------------------------------------------------------
 // Identity / capability shapes
@@ -244,6 +254,8 @@ export interface HappyFoxAuth {
   authCode: string;
   accountName: string;
   region: 'us' | 'eu';
+  /** Custom domain serving the API; when set it replaces `<accountName>.happyfox.com|net`. */
+  apiHost?: string;
 }
 
 export interface AuthContext {
@@ -301,6 +313,17 @@ export class ResourceNotFoundError extends Error {
   constructor(uri: string) {
     super(`Resource not found: ${uri}`);
     this.name = 'ResourceNotFoundError';
+  }
+}
+
+/**
+ * HappyFox refused the stored API key and auth code (HTTP 401). Not a JSON-RPC outcome: it
+ * propagates to the transport, which ends the grant and answers HTTP 401 + `invalid_token`.
+ */
+export class CredentialsRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CredentialsRejectedError';
   }
 }
 

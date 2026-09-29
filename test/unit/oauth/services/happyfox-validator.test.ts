@@ -121,7 +121,7 @@ describe('validateAndResolveStaff', () => {
     });
 
     it('returns error for non-array API response', async () => {
-      mockHappyFoxGet('/staff/', { error: 'not an array' });
+      mockHappyFoxGet('/staff/', { data: 'not an array' });
 
       const result = await validateAndResolveStaff(testCredentials, 'test@example.com');
 

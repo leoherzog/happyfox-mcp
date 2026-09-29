@@ -2,12 +2,24 @@
  * OAuth 2.0 type definitions for HappyFox MCP Server
  */
 
+/**
+ * Props stored in the OAuth grant and passed to the API handler. Everything else about the
+ * grant lives in the encrypted KV credential record keyed by tokenId; scopes are here
+ * because the library passes only props to the API handler.
+ */
+export interface OAuthProps {
+  tokenId: string;
+  scopes: string[];
+}
+
 // Stored credentials in KV (encrypted with AES-256-GCM)
 export interface StoredCredentials {
   apiKey: string;
   authCode: string;
   accountName: string;
   region: 'us' | 'eu';
+  /** Custom domain entered at consent; absent means the account subdomain host. */
+  apiHost?: string;
   staffId: number;
   staffName: string;
   staffEmail: string;
@@ -26,6 +38,7 @@ export interface ConsentPageData {
     accountName?: string;
     email?: string;
     region?: string;
+    apiHost?: string;
   };
 }
 
