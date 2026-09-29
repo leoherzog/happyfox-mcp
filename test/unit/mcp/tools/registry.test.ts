@@ -137,7 +137,7 @@ describe("ToolRegistry", () => {
 
     it("wraps HappyFoxAPIError in ToolExecutionError", async () => {
       // With mocked fetch returning 401, the handler will throw ToolExecutionError
-      await expect(registry.callToolWithAuth("happyfox_get_ticket", { ticket_id: "invalid" }, testAuthContext))
+      await expect(registry.callToolWithAuth("happyfox_get_ticket", { ticket_id: "999" }, testAuthContext))
         .rejects.toThrow(ToolExecutionError);
 
       // Verify fetch was called (not bypassed)

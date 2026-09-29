@@ -17,6 +17,16 @@ export const TOOL_SCOPE_MAP: Record<string, HappyFoxScope[]> = {
   'happyfox_get_asset': ['happyfox:read'],
   'happyfox_list_asset_custom_fields': ['happyfox:read'],
   'happyfox_get_asset_custom_field': ['happyfox:read'],
+  'happyfox_get_asset_type': ['happyfox:read'],
+  'happyfox_get_report_summary': ['happyfox:read'],
+  'happyfox_get_report_tabular_data': ['happyfox:read'],
+  'happyfox_get_report_response_stats': ['happyfox:read'],
+  'happyfox_get_report_staff_performance': ['happyfox:read'],
+  'happyfox_get_report_staff_activity': ['happyfox:read'],
+  'happyfox_get_report_contact_activity': ['happyfox:read'],
+  'happyfox_get_report_sla_performance': ['happyfox:read'],
+  'happyfox_get_kb_article': ['happyfox:read'],
+  'happyfox_get_kb_section': ['happyfox:read'],
 
   // Write operations (happyfox:write)
   'happyfox_create_ticket': ['happyfox:write'],
@@ -27,9 +37,11 @@ export const TOOL_SCOPE_MAP: Record<string, HappyFoxScope[]> = {
   'happyfox_forward_ticket': ['happyfox:write'],
   'happyfox_update_ticket_tags': ['happyfox:write'],
   'happyfox_update_ticket_custom_fields': ['happyfox:write'],
+  'happyfox_update_ticket_properties': ['happyfox:write'],
   'happyfox_subscribe_to_ticket': ['happyfox:write'],
   'happyfox_unsubscribe_from_ticket': ['happyfox:write'],
   'happyfox_create_contact': ['happyfox:write'],
+  'happyfox_upsert_contacts_bulk': ['happyfox:write'],
   'happyfox_update_contact': ['happyfox:write'],
   'happyfox_create_contact_group': ['happyfox:write'],
   'happyfox_update_contact_group': ['happyfox:write'],
@@ -42,12 +54,16 @@ export const TOOL_SCOPE_MAP: Record<string, HappyFoxScope[]> = {
   'happyfox_delete_ticket': ['happyfox:admin'],
   'happyfox_move_ticket_category': ['happyfox:admin'],
   'happyfox_delete_asset': ['happyfox:admin'],
+  // Account-wide configuration: omitted choices are deleted (Docs/1247).
+  'happyfox_update_ticket_custom_field_choices': ['happyfox:admin'],
 };
 
 /** Tool name -> the parameter that carries the acting staff member's id. */
 export const TOOLS_REQUIRING_STAFF_ID: Record<string, string> = {
   // Ticket tools using 'staff_id'
   'happyfox_add_staff_reply': 'staff_id',
+  'happyfox_update_ticket_properties': 'staff_id',
+  'happyfox_update_ticket_custom_fields': 'staff_id',
   'happyfox_add_private_note': 'staff_id',
   'happyfox_forward_ticket': 'staff_id',
   'happyfox_delete_ticket': 'staff_id',
