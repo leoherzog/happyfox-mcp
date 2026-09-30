@@ -1,7 +1,7 @@
 /**
  * Outbound fetch mocking for tests.
  *
- * `@cloudflare/vitest-pool-workers` has no fetch mock, so this module replaces
+ * `@cloudflare/vitest-plugin` has no fetch mock, so this module replaces
  * `globalThis.fetch` and keeps the slice of undici's MockAgent API the suite relies on:
  * `get(origin).intercept({...}).reply(...) / .replyWithError(...)`.
  *

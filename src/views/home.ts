@@ -160,7 +160,7 @@ export function renderHomePage(origin: string): string {
             <td>Authorization server metadata (RFC 8414)</td>
           </tr>
           <tr>
-            <td><code><a href="${base}/.well-known/oauth-protected-resource">/.well-known/oauth-protected-resource</a></code></td>
+            <td><code><a href="${base}/.well-known/oauth-protected-resource/mcp">/.well-known/oauth-protected-resource/mcp</a></code></td>
             <td>Protected resource metadata (RFC 9728)</td>
           </tr>
         </tbody>

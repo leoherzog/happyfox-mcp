@@ -752,6 +752,18 @@ describe("McpApiHandler - MCP 2026-07-28 transport", () => {
       expect(json.error.code).not.toBe(-32602);
     });
 
+    it("applies the access token's scopes when they are narrower than the grant's", async () => {
+      const params = { uri: "happyfox://categories" };
+      const response = await new McpApiHandler().fetch(
+        post(createRequest("resources/read", params), createMCPHeaders("resources/read", params)),
+        env,
+        { ...testCtx, auth: { token: "t", audience: "https://worker.test/mcp", scope: [] } } as any
+      );
+
+      expect(response.status).toBe(403);
+      expect(response.headers.get("WWW-Authenticate") ?? "").toContain('scope="happyfox:read"');
+    });
+
     it("keeps CORS headers on the 403 so a browser client can read the challenge", async () => {
       const response = await send(
         "tools/call",

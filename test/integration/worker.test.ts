@@ -47,7 +47,7 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
     });
 
     it("returns OAuth protected resource metadata", async () => {
-      const response = await workerExports.default.fetch("https://worker.test/.well-known/oauth-protected-resource", {
+      const response = await workerExports.default.fetch("https://worker.test/.well-known/oauth-protected-resource/mcp", {
         method: "GET"
       });
 
@@ -55,34 +55,44 @@ describe("Worker Fetch Handler - OAuth MCP Server", () => {
       expect(response.headers.get("Content-Type")).toBe("application/json");
 
       const body = await response.json() as Record<string, unknown>;
-      expect(body.resource).toBeDefined();
+      expect(body.resource).toBe("https://worker.test/mcp");
       expect(body.authorization_servers).toBeDefined();
-      expect(body.scopes_supported).toContain("happyfox:read");
+      expect(body.scopes_supported).toEqual(["happyfox:read", "happyfox:write", "happyfox:admin"]);
+    });
+
+    it("binds each origin to its own /mcp resource", async () => {
+      const response = await workerExports.default.fetch("http://localhost:8787/.well-known/oauth-protected-resource/mcp");
+
+      expect(response.status).toBe(200);
+      expect((await response.json() as Record<string, unknown>).resource).toBe("http://localhost:8787/mcp");
+    });
+
+    it("serves protected resource metadata only at the resource's path", async () => {
+      const response = await workerExports.default.fetch("https://worker.test/.well-known/oauth-protected-resource");
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
     });
   });
 
   describe("Authorization Endpoint (Consent Flow)", () => {
-    // Note: These tests return 500 because the OAuth library throws errors
-    // before our validation code runs. The library requires the
-    // 'global_fetch_strictly_public' compatibility flag for CIMD URLs.
+    // The library rejects these before handleAuthorize validates anything; the handler turns its
+    // AuthorizationError or CimdFetchError into a 400 page, never the generic 500.
 
-    it("returns error for missing PKCE (handled by OAuth library)", async () => {
-      // Without code_challenge and with CIMD client_id, library throws before we validate
+    it("returns 400 for missing PKCE (handled by OAuth library)", async () => {
       const response = await workerExports.default.fetch("https://worker.test/authorize?client_id=https://example.com/.well-known/oauth-client-metadata&redirect_uri=https://example.com/callback&response_type=code&state=test", {
         method: "GET"
       });
 
-      // Library throws error for CIMD without compatibility flag, caught by our error handler
-      expect([400, 500]).toContain(response.status);
+      expect(response.status).toBe(400);
     });
 
-    it("returns error for unsupported response types (handled by OAuth library)", async () => {
+    it("returns 400 for unsupported response types (handled by OAuth library)", async () => {
       const response = await workerExports.default.fetch("https://worker.test/authorize?client_id=https://example.com/.well-known/oauth-client-metadata&redirect_uri=https://example.com/callback&response_type=token&code_challenge=test&code_challenge_method=S256", {
         method: "GET"
       });
 
-      // Library rejects implicit grant before we can validate
-      expect([400, 500]).toContain(response.status);
+      expect(response.status).toBe(400);
     });
   });
 
@@ -241,6 +251,7 @@ async function registerClient(): Promise<string> {
     defaultHandler: { fetch: async () => new Response(null) },
     authorizeEndpoint: "/authorize",
     tokenEndpoint: "/oauth/token",
+    resourceMetadata: { resource: "https://worker.test/mcp" },
   }, env);
   const client = await helpers.createClient({
     redirectUris: [REDIRECT_URI],
@@ -442,6 +453,59 @@ describe("Consent POST", () => {
   });
 });
 
+describe("Tokens are bound to the origin's /mcp resource", () => {
+  let clientId: string;
+
+  beforeAll(async () => {
+    clientId = await registerClient();
+  });
+
+  beforeEach(() => {
+    resetFetchMock();
+  });
+
+  it("refuses an authorization request for another resource without showing consent", async () => {
+    const response = await workerExports.default.fetch(`https://worker.test/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: REDIRECT_URI,
+      code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      code_challenge_method: "S256",
+      resource: "https://other.example/mcp",
+      state: "state-1",
+    })}`, { redirect: "manual" });
+
+    expect(response.status).toBe(302);
+    const location = new URL(response.headers.get("Location")!);
+    expect(location.origin + location.pathname).toBe(REDIRECT_URI);
+    expect(location.searchParams.get("error")).toBe("invalid_target");
+  });
+
+  it("answers 400, not 500, when the client_id is unknown", async () => {
+    const response = await workerExports.default.fetch(`https://worker.test/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "no-such-client",
+      redirect_uri: REDIRECT_URI,
+      code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      code_challenge_method: "S256",
+    })}`, { redirect: "manual" });
+
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects a token presented on another origin", async () => {
+    const tokens = await connect(clientId);
+    expect((await discover(tokens.access_token)).status).toBe(200);
+
+    const elsewhere = await workerExports.default.fetch("http://localhost:8787/mcp", {
+      method: "POST",
+      headers: { ...createMCPHeaders("server/discover"), Authorization: `Bearer ${tokens.access_token}` },
+      body: JSON.stringify(createRequest("server/discover")),
+    });
+    expect(elsewhere.status).toBe(401);
+  });
+});
+
 describe("Token refresh re-checks the consenting agent", () => {
   let clientId: string;
   const store = new CredentialStore(env.OAUTH_KV, env.CREDENTIAL_ENCRYPTION_KEY);
@@ -525,6 +589,7 @@ describe("A HappyFox 401 during a request ends the grant", () => {
       defaultHandler: { fetch: async () => new Response(null) },
       authorizeEndpoint: "/authorize",
       tokenEndpoint: "/oauth/token",
+      resourceMetadata: { resource: "https://worker.test/mcp" },
     }, env);
     expect((await helpers.listUserGrants(tokenId)).items).toEqual([]);
 

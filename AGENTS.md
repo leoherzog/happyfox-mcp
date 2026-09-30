@@ -41,7 +41,7 @@ MCP Client → Workers Cache → Cloudflare Worker → OAuth Validation → Head
 | `/oauth/token` | POST | OAuth token exchange (handled by the library, plus the refresh-time revalidation below) |
 | `/api/validate-staff` | POST | Live credential check for the consent form (see below); any other method falls through to 404 |
 | `/.well-known/oauth-authorization-server` | GET | OAuth server metadata (RFC 8414) |
-| `/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp` | GET | Protected resource metadata (RFC 9728, and the path-suffixed variant of §3.1 that the 401 challenge points at) |
+| `/.well-known/oauth-protected-resource/mcp` | GET | Protected resource metadata (RFC 9728 §3.1) for the resource `<origin>/mcp`. The bare `/.well-known/oauth-protected-resource` is 404 |
 
 `/api/validate-staff` takes JSON `{accountName, apiKey, authCode, email, region?, apiHost?, scopes?}` and answers `{valid, staffName, error, warnings}`. It first requires the consent page's CSRF token in an `X-CSRF-Token` header equal to the `csrf_token` cookie, which `GET /authorize` sets with `Path=/`, and answers 403 otherwise. A cross-origin page can neither read the token nor send the header, which needs a preflight this route never grants. It answers 400 for a missing field, an invalid account name, a region other than `us` or `eu`, or an invalid `apiHost`. `warnings` lists tools the requested scopes expose that the agent's role cannot use: `move_ticket_category` needs `move_tickets` or `move_ticket_to_any_category`, and `delete_asset` needs `manage_assets`. Warnings never block consent.
 
@@ -77,7 +77,7 @@ OAuth 2.0 (RFC 6749) with PKCE. HappyFox credentials are collected during the co
 
 `buildAuthContext` reads the record back through `storedAuth()` (`src/oauth/services/credential-store.ts`), which throws for a region, account or host that consent would reject, including an `apiHost` that is present but not a string. That throw is the step-26 401, so a crafted record never reaches a request URL or a cache key.
 
-The `/.well-known/*` discovery documents in the routes table are answered by `@cloudflare/workers-oauth-provider` itself - it intercepts those paths before delegating to `defaultHandler`, deriving both the issuer and the resource identifier from the request URL, so there is nothing to route for them here.
+The `/.well-known/*` discovery documents in the routes table are answered by `@cloudflare/workers-oauth-provider` itself - it intercepts those paths before delegating to `defaultHandler`, so there is nothing to route for them here. The issuer comes from the request URL and the resource from the provider's `resourceMetadata` (see below).
 
 **Available Scopes** (must match `SCOPE_DESCRIPTIONS` in `src/oauth/types.ts` and `TOOL_SCOPE_MAP`):
 
@@ -91,26 +91,28 @@ A client that requests no scope is granted `DEFAULT_SCOPES` (`happyfox:read`); a
 
 **Staff ID Auto-Resolution:** During OAuth consent, the server resolves the user's `staff_id` by matching their email against the HappyFox staff list. HappyFox has no endpoint that names the agent owning an API key, which is why consent asks for the email.
 
-**OAuth Provider Configuration (`@cloudflare/workers-oauth-provider` 0.8.x):**
+**OAuth Provider Configuration (`@cloudflare/workers-oauth-provider` 1.2.x):**
 
-Options set explicitly in `src/index.ts`, each for a reason:
+The library binds every token to one canonical resource. `providerFor()` in `src/index.ts` builds one provider per request origin, with resource `<origin>/mcp`, so workers.dev, a custom domain and `wrangler dev` on `http://localhost:8787` each work without configuration. Cloudflare routes only this Worker's own hosts to it, so the origin is trusted. A token works only on the origin that issued it, and an authorization request naming any other resource is refused with `invalid_target`. The cache holds at most 16 providers, for wildcard routes.
+
+Options set explicitly in `createProvider()`, each for a reason:
 
 | Option | Value | Why |
 |--------|-------|-----|
 | `clientIdMetadataDocumentEnabled` | `true` | CIMD is opt-in. Clients here identify by metadata-document URL, so this is required. Needs the `global_fetch_strictly_public` flag. |
-| `allowPlainPKCE` | `false` | `handleAuthorize` already rejects anything but S256; this makes the library enforce it too, and drops `plain` from the advertised metadata. |
-| `resourceMatchOriginOnly` | `true` | Resource indicators are compared by origin rather than exact string. One origin, one resource here, so it is equivalent in strength while tolerating `https://host/` vs `https://host/mcp`. |
+| `resourceMetadata.resource` | `<origin>/mcp` | Required since 1.0. The `/mcp` form matches `bearerChallenge` and the `resource` conformant MCP clients send; `https://host/` would be refused. |
+| `requiredScopes` | `AVAILABLE_SCOPES` | Published as `scopes_supported` in the protected-resource metadata and as `scope=` on the library's 401, so a client requests every scope and consent can offer them. Without it the metadata lists none and clients fall back to `DEFAULT_SCOPES`. |
 | `refreshTokenTTL` | 90 days | Library default is 30. |
 | `accessTokenTTL` | 3600 s | The library default, pinned because it bounds how long a deactivated agent or a disabled key keeps working. |
-| `tokenExchangeCallback` | `revalidateOnRefresh` | Re-checks the grant on every refresh (see Re-Authorization). The library passes the callback no env, so `index.ts` uses `import { env } from 'cloudflare:workers'`. |
+| `tokenExchangeCallback` | `revalidateOnRefresh` | Re-checks the grant on every refresh (see Re-Authorization), with `options.env`. |
 
-**Scopes are not passed to the API handler.** The library (0.8.3) hands the handler `ctx.props` only, never `ctx.scopes`, so the granted scopes are stored in `OAuthProps` at authorization time and read back from `props.scopes` in `buildAuthContext`. The `resource` parameter, by contrast, is passed to `completeAuthorization()` untouched: the library's audience check parses the URI and treats a bare `/` path as covering the origin, so tokens stay properly audience-bound.
+**Scopes come from the access token.** The library hands the handler `ctx.auth`, whose `scope` is what the token carries, which can be narrower than the grant. `buildAuthContext` uses it and falls back to `props.scopes`, the scopes consent granted, stored in `OAuthProps`. `handleAuthorize` turns the library's `AuthorizationError` into its ready-made redirect back to the client, or a 400 page when no redirect is safe, and a `CimdFetchError` into a 400 page.
 
 ### Re-Authorization
 
 A grant stops working, and the client must go back through consent, in three ways:
 
-- **Refresh.** On every `refresh_token` grant, `revalidateOnRefresh` makes one `GET /staff/` call with no transport retries and matches the stored `staffId`. An inactive or deleted agent, a HappyFox 401 or 403, or a missing or invalid stored record gets OAuth `invalid_grant`, and the KV record is deleted, so live access tokens then fail step 26. When HappyFox cannot be reached, the refresh proceeds.
+- **Refresh.** On every `refresh_token` grant, `revalidateOnRefresh` makes one `GET /staff/` call with no transport retries and matches the stored `staffId`. An inactive or deleted agent, a HappyFox 401 or 403, or a missing or invalid stored record gets OAuth `invalid_grant`. The KV record is deleted, and the library revokes the grant with its live access tokens. When HappyFox cannot be reached, the refresh proceeds.
 - **HappyFox 401 on a request.** During `tools/call` or `resources/read`, a HappyFox 401 is HTTP 401 with code `401` and `WWW-Authenticate: Bearer ... error="invalid_token", error_description="HappyFox rejected the stored API key and auth code"`. `McpApiHandler.endGrant` first deletes the KV credentials, then revokes the grant through `env.OAUTH_PROVIDER.listUserGrants(tokenId)` and `revokeGrant`; consent sets `userId = tokenId`, so only the grant that made the request is revoked. A HappyFox 403 can be the agent's role, which re-consent would not fix, so it stays an `isError` result on `tools/call` and a `-32603` error on `resources/read`.
 - **Missing credentials.** A token whose KV record is gone or fails `storedAuth()` gets the step-26 401.
 
@@ -304,7 +306,7 @@ Everything *returned* by step 27 is HTTP **200**, including application-level `-
 
 A request whose token lacks the scope for the operation gets **HTTP 403** with a `WWW-Authenticate: Bearer` challenge carrying `error="insufficient_scope"`, `scope="<what the operation needs>"` and `resource_metadata`, so the client can step up its authorization. Both scope checks follow that: `tools/call` on a tool the token's scopes do not cover (`ToolRegistry.callToolWithAuth`, which denies a registered tool missing from `TOOL_SCOPE_MAP` to every caller) and `resources/read` without `happyfox:read` (`MCPServer.handleResourceRead`). They throw `InsufficientScopeError` (`src/types/index.ts`), one of the two errors `MCPServer.handleRequest` lets escape; the other is `CredentialsRejectedError` (see Re-Authorization). The transport catches both and builds the challenge. The body uses the application-defined code `403` (`INSUFFICIENT_SCOPE`) with `data.requiredScopes` - outside the JSON-RPC reserved range, and equal to the HTTP status so the two can never disagree. Do **not** report a scope failure as an `isError` tool result, as `-32602`, or as `-32600`.
 
-`resource_metadata` names the path-suffixed document (`/.well-known/oauth-protected-resource/mcp`), the same one `@cloudflare/workers-oauth-provider` names on its own 401s; `McpApiHandler.bearerChallenge` also builds the `invalid_token` challenges. Because `WWW-Authenticate` is not CORS-safelisted, `src/middleware/cors.ts` exposes it - the only entry in `Access-Control-Expose-Headers`, since this server sets no `MCP-*` response headers.
+`resource_metadata` names the path-suffixed document (`/.well-known/oauth-protected-resource/mcp`), the same one `@cloudflare/workers-oauth-provider` names on its own 401s; `McpApiHandler.bearerChallenge` also builds the `invalid_token` challenges. Because `WWW-Authenticate` is not CORS-safelisted, `src/middleware/cors.ts` exposes it, since this server sets no `MCP-*` response headers. The library keeps the handler's CORS headers and appends `Retry-After` to `Access-Control-Expose-Headers` and `Origin` to `Vary`. On a response without `Access-Control-Allow-Origin`, such as the step-2 403, it reflects the request's `Origin`, which exposes only that error.
 
 ### Supported Methods
 
@@ -483,14 +485,15 @@ The project uses Cloudflare Workers' built-in TypeScript support - no build step
 
 ## Toolchain Notes
 
-- **`compatibility_date`**: `2026-07-30`, matching the `workerd` bundled with Wrangler 4.118. Bump it together with Wrangler so local dev runs the same runtime as production, and rerun `npx wrangler types` afterwards.
+- **`compatibility_date`**: `2026-09-26`, matching the `workerd` bundled with Wrangler 4.143. Bump it together with Wrangler and `@cloudflare/vitest-plugin`, which pins its own Wrangler, so local dev, tests and production run one runtime. Rerun `npx wrangler types` afterwards.
+- **Node.js compatibility**: any date from 2026-08-04 enables `nodejs_compat` and `nodejs_compat_v2`, so `process`, `Buffer` and Node timers exist at runtime. Do not list either flag; workerd rejects a flag its date already enables. `src` uses no Node APIs, and `wrangler types`' advice to install `@types/node` does not apply.
 - **`@cloudflare/workers-types` vs generated types**: `tsconfig.json` uses the published `@cloudflare/workers-types` package; `worker-configuration.d.ts` is generated by `wrangler types` and embeds a full copy of the runtime types. Do **not** load both in one program - they collide. Wrangler now recommends the generated file; switching is a separate change.
 
-## Testing Notes (Vitest 4 / vitest-pool-workers 0.20)
+## Testing Notes (Vitest 4 / vitest-plugin 1.3)
 
-- **Config is a Vite plugin.** `vitest.config.mts` uses `cloudflareTest({...})` from `@cloudflare/vitest-pool-workers` inside `plugins`, not `defineWorkersConfig`. The file must be `.mts` - the package is ESM-only and the project has no `"type": "module"`.
-- **There is no `cloudflare:test` module.** Use `import { env, exports } from "cloudflare:workers"`; the entry point is `exports.default.fetch(...)`, not `SELF.fetch(...)`. `test/env.d.ts` declares `Cloudflare.GlobalProps.mainModule` so `exports.default` is typed.
-- **`exports.default.fetch` follows redirects** like a service binding, so pass `redirect: "manual"` to observe the consent 302. Integration tests register an OAuth client in the test KV with `getOAuthApi({...}, env).createClient({ tokenEndpointAuthMethod: "none", redirectUris: [...] })`, then drive consent, code exchange, refresh and `/api/validate-staff`, whose requests send a matching `csrf_token` cookie and `X-CSRF-Token` header. The token id is the first `:`-separated segment of an access token.
+- **Config is a Vite plugin.** `vitest.config.mts` uses `cloudflareTest({...})` from `@cloudflare/vitest-plugin` (the renamed `@cloudflare/vitest-pool-workers`) inside `plugins`, not `defineWorkersConfig`. The file must be `.mts` - the package is ESM-only and the project has no `"type": "module"`.
+- **Use `cloudflare:workers`, not `cloudflare:test`**, whose `env` and `SELF` are deprecated: `import { env, exports } from "cloudflare:workers"`; the entry point is `exports.default.fetch(...)`, not `SELF.fetch(...)`. `test/env.d.ts` declares `Cloudflare.GlobalProps.mainModule` so `exports.default` is typed.
+- **`exports.default.fetch` follows redirects** like a service binding, so pass `redirect: "manual"` to observe the consent 302. Integration tests register an OAuth client in the test KV with `getOAuthApi({..., resourceMetadata: { resource: "https://worker.test/mcp" } }, env).createClient({ tokenEndpointAuthMethod: "none", redirectUris: [...] })`, then drive consent, code exchange, refresh and `/api/validate-staff`, whose requests send a matching `csrf_token` cookie and `X-CSRF-Token` header. The token id is the first `:`-separated segment of an access token.
 - **There is no `fetchMock`.** `test/helpers/fetch-mock.ts` is a local shim over `globalThis.fetch` that keeps the slice of undici's MockAgent API the suite uses (`get(origin).intercept({path, method}).reply(...)` / `.replyWithError(...)`, `assertNoPendingInterceptors()`). It also fills in response reason phrases, which the `Response` constructor leaves blank but undici set. It records every request, matched or not, through `fetchMock.requests()` / `lastRequest()` (method, url, path, query, headers, body, `json()`, redirect), and never follows a redirect.
 - **HappyFox mocks** (`test/helpers/fetch-mock-helpers.ts`) match the API path exactly: a path without `?` matches any query, a path with `?` must match exactly. `mockHappyFoxRaw(method, path, status, body, headers)` serves redirects, HTML and empty bodies; `mockRateLimitResponse(path, method, region, headers)` serves a 429 with `Retry-After`; `sentHappyFoxRequests()` / `lastHappyFoxRequest()` add `apiPath`. Assert the wire shape with `lastHappyFoxRequest().json()`, `.query` and `.headers`.
 - **Endpoint tests** use `createMockClient()`; injection cases draw on `INJECTION_IDS` / `MALFORMED_IDS` from `test/helpers/invalid-ids.ts` and assert the client was `not.toHaveBeenCalled()`. Every behaviour change needs a test asserting the documented request shape (path, method, query, body).
@@ -498,7 +501,8 @@ The project uses Cloudflare Workers' built-in TypeScript support - no build step
 - **Resource registry tests** clear the Cache API with `referenceCache.invalidate(auth, key)`, not raw URLs, because the key includes a credential hash.
 - **Unhandled rejections fail the run.** When a promise is expected to reject while fake timers advance, attach the assertion *before* advancing (see the retry tests in `test/unit/happyfox/client.test.ts`).
 - Storage isolation is per test file.
-- Use `globalThis`, not `global`: `global` is Node-only and undeclared under `@cloudflare/workers-types`.
+- **Vitest 5 is not supported** by any `@cloudflare/vitest-plugin` release yet (every one peers `vitest ^4.1.0`), so Vitest and `@vitest/coverage-istanbul` stay on 4.x.
+- Use `globalThis`, not `global`.
 - Tests are not covered by `npm run typecheck` (it is `src` only). Check them with `npx tsc --noEmit -p test/tsconfig.json`. That config sets `"exclude": []` to undo the root config's `exclude: ["test"]`; without it the program is empty and typechecks nothing.
 
 ## Environment Variables

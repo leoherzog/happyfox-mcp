@@ -3,13 +3,13 @@
  * MCP 2026-07-28 Streamable HTTP Transport with OAuth 2.0 Authentication
  */
 
-import { env as workerEnv } from 'cloudflare:workers';
-import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
+import { AuthorizationError, CimdFetchError, OAuthProvider } from '@cloudflare/workers-oauth-provider';
 import type {
   OAuthHelpers,
   AuthRequest,
   ClientInfo,
   CompleteAuthorizationOptions,
+  OAuthResourceAuth,
 } from '@cloudflare/workers-oauth-provider';
 import {
   Env,
@@ -66,11 +66,13 @@ interface EnvWithOAuth extends Env {
 }
 
 /**
- * Build AuthContext from OAuth props by retrieving stored credentials
+ * Build AuthContext from OAuth props by retrieving stored credentials.
+ * @param tokenScopes - the scopes the access token carries, which can be narrower than the grant's
  */
 async function buildAuthContext(
   props: OAuthProps,
-  env: Env
+  env: Env,
+  tokenScopes?: string[]
 ): Promise<AuthContext> {
   const credentialStore = new CredentialStore(env.OAUTH_KV, env.CREDENTIAL_ENCRYPTION_KEY);
   const storedCreds = await credentialStore.retrieve(props.tokenId);
@@ -84,7 +86,7 @@ async function buildAuthContext(
     // can never reach a request URL or a reference-cache key.
     credentials: storedAuth(storedCreds),
     staffId: storedCreds.staffId,
-    scopes: props.scopes || [],
+    scopes: tokenScopes ?? props.scopes ?? [],
   };
 }
 
@@ -93,7 +95,7 @@ async function buildAuthContext(
  *
  * MCP 2026-07-28 is stateless: `Mcp-Session-Id` and `Last-Event-ID` are never read, minted or
  * echoed - inbound copies are ignored, not rejected. Do not re-introduce them.
- * env/ctx are 'any' to satisfy OAuthProvider's handler type; it adds `props` at runtime.
+ * env/ctx are 'any' to satisfy OAuthProvider's handler type; it adds `props` and `auth` at runtime.
  * Exported so tests can drive the pipeline directly (the provider answers 401 first).
  */
 export class McpApiHandler {
@@ -103,7 +105,7 @@ export class McpApiHandler {
     ctx: any
   ): Promise<Response> {
     const typedEnv = env as Env;
-    const typedCtx = ctx as ExecutionContext & { props: OAuthProps; scopes: string[] };
+    const typedCtx = ctx as ExecutionContext & { props: OAuthProps; auth?: OAuthResourceAuth };
 
     // 1. Checked before anything else so a misconfigured server answers 500, not 401.
     if (!decodeEncryptionKey(typedEnv.CREDENTIAL_ENCRYPTION_KEY)) {
@@ -282,7 +284,7 @@ export class McpApiHandler {
     //     pointer the client needs to re-authorize.
     let authContext: AuthContext;
     try {
-      authContext = await buildAuthContext(typedCtx.props, typedEnv);
+      authContext = await buildAuthContext(typedCtx.props, typedEnv, typedCtx.auth?.scope);
     } catch {
       return this.jsonRpcError(
         UNAUTHORIZED,
@@ -442,8 +444,8 @@ const defaultHandler = {
       });
     }
 
-    // OAuthProvider answers the /.well-known/* discovery documents (including the RFC 9728
-    // path-suffixed variants) before delegating here, so there is nothing to route for them.
+    // OAuthProvider answers /.well-known/oauth-authorization-server and the RFC 9728 document
+    // for its resource, /.well-known/oauth-protected-resource/mcp, before delegating here.
 
     if (url.pathname === '/authorize') {
       return handleAuthorize(request, typedEnv);
@@ -606,9 +608,8 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
 
       const props: OAuthProps = { tokenId, scopes: requestedScopes };
 
-      // The resource parameter is passed through untouched: as of library v0.4.0,
-      // audience checks parse the URI and treat a bare "/" path as covering the origin,
-      // so the RFC 8707 binding survives the trailing slash that MCP clients send.
+      // parseAuthRequest has already matched the request's resource against the provider's
+      // `<origin>/mcp`, so the grant is audience-bound to this origin's MCP endpoint.
       const authorization: CompleteAuthorizationOptions = {
         request: oauthReq,
         userId: tokenId,
@@ -624,6 +625,21 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
 
     return new Response('Method Not Allowed', { status: 405 });
   } catch (error) {
+    // A malformed request or a resource other than this origin's /mcp. The library sets
+    // redirectTo only once the client's redirect_uri is validated.
+    if (error instanceof AuthorizationError) {
+      if (error.redirectTo) return Response.redirect(error.redirectTo, 302);
+      return new Response(
+        renderErrorPage('Invalid Request', error.description),
+        { status: 400, headers: { 'Content-Type': 'text/html' } }
+      );
+    }
+    if (error instanceof CimdFetchError) {
+      return new Response(
+        renderErrorPage('Invalid Client', 'The client metadata document could not be loaded.'),
+        { status: 400, headers: { 'Content-Type': 'text/html' } }
+      );
+    }
     console.error('Authorization error:', error);
     return new Response(
       renderErrorPage('Error', 'An unexpected error occurred.'),
@@ -713,31 +729,49 @@ async function handleValidateStaff(request: Request): Promise<Response> {
   }
 }
 
-const oauthProvider = new OAuthProvider({
-  apiRoute: '/mcp',
-  apiHandler: new McpApiHandler(),
-  defaultHandler,
-  authorizeEndpoint: '/authorize',
-  tokenEndpoint: '/oauth/token',
-  scopesSupported: AVAILABLE_SCOPES,
-  refreshTokenTTL: 90 * 24 * 60 * 60, // 90 days (library default is 30)
+/**
+ * One provider per origin, each with resource `<origin>/mcp`. The library binds every token to
+ * one canonical resource, and Cloudflare routes only this Worker's own hosts here, so the origin
+ * is trusted. Tokens work only on the origin that issued them.
+ */
+function createProvider(origin: string): OAuthProvider {
+  return new OAuthProvider({
+    apiRoute: '/mcp',
+    apiHandler: new McpApiHandler(),
+    defaultHandler,
+    authorizeEndpoint: '/authorize',
+    tokenEndpoint: '/oauth/token',
+    scopesSupported: AVAILABLE_SCOPES,
+    resourceMetadata: { resource: `${origin}/mcp` },
+    // Advertised in the protected-resource metadata and the 401 challenge, so a client asks for
+    // every scope and consent can offer them all.
+    requiredScopes: AVAILABLE_SCOPES,
+    refreshTokenTTL: 90 * 24 * 60 * 60, // 90 days (library default is 30)
 
-  // Every refresh re-reads the consenting agent, so this bounds how long a deactivated agent or
-  // a disabled API key keeps working. The callback gets no env, hence the module-level import.
-  accessTokenTTL: 60 * 60,
-  tokenExchangeCallback: (options) => revalidateOnRefresh(options, workerEnv as Env),
+    // Every refresh re-reads the consenting agent, so this bounds how long a deactivated agent or
+    // a disabled API key keeps working.
+    accessTokenTTL: 60 * 60,
+    tokenExchangeCallback: (options) => revalidateOnRefresh(options, options.env as Env),
 
-  // Clients identify themselves with a Client ID Metadata Document URL. Opt-in since
-  // v0.3.0; requires the 'global_fetch_strictly_public' compatibility flag.
-  clientIdMetadataDocumentEnabled: true,
+    // Clients identify themselves with a Client ID Metadata Document URL. Opt-in, and requires
+    // the 'global_fetch_strictly_public' compatibility flag.
+    clientIdMetadataDocumentEnabled: true,
+  });
+}
 
-  // handleAuthorize already rejects anything but S256; this makes the library agree.
-  allowPlainPKCE: false,
+// Bounded because a wildcard route could deliver many hosts.
+const MAX_PROVIDERS = 16;
+const providers = new Map<string, OAuthProvider>();
 
-  // One resource on one origin, so origin matching is as strong as exact-string matching
-  // and tolerates a client that sends `https://host/` then `https://host/mcp`.
-  resourceMatchOriginOnly: true,
-});
+function providerFor(origin: string): OAuthProvider {
+  let provider = providers.get(origin);
+  if (!provider) {
+    if (providers.size >= MAX_PROVIDERS) providers.clear();
+    provider = createProvider(origin);
+    providers.set(origin, provider);
+  }
+  return provider;
+}
 
 /**
  * Public discovery documents are identical for every caller and the library sets no
@@ -747,10 +781,7 @@ function edgeCacheControlFor(pathname: string): string | null {
   if (pathname === '/.well-known/oauth-authorization-server') {
     return 'public, max-age=3600';
   }
-  if (
-    pathname === '/.well-known/oauth-protected-resource' ||
-    pathname.startsWith('/.well-known/oauth-protected-resource/')
-  ) {
+  if (pathname === '/.well-known/oauth-protected-resource/mcp') {
     return 'public, max-age=3600';
   }
   return null;
@@ -782,6 +813,7 @@ function withCacheDefaults(request: Request, response: Response): Response {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    return withCacheDefaults(request, await oauthProvider.fetch(request, env, ctx));
+    const provider = providerFor(new URL(request.url).origin);
+    return withCacheDefaults(request, await provider.fetch(request, env, ctx));
   },
 };

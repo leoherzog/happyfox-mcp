@@ -1,7 +1,7 @@
 {
   "name": "happyfox-mcp",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-30",
+  "compatibility_date": "2026-09-26",
   "compatibility_flags": ["global_fetch_strictly_public"],
 
   "placement": {

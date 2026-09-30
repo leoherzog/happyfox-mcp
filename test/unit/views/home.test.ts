@@ -78,7 +78,7 @@ describe("renderHomePage", () => {
 
   it("links to the well-known metadata endpoints", () => {
     expect(html).toContain("/.well-known/oauth-authorization-server");
-    expect(html).toContain("/.well-known/oauth-protected-resource");
+    expect(html).toContain("/.well-known/oauth-protected-resource/mcp");
   });
 
   it("escapes HTML in the origin", () => {

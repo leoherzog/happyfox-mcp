@@ -33,11 +33,14 @@ function options(grantType: GrantType, props: unknown = { tokenId: TOKEN_ID, sco
   return {
     grantType,
     clientId: 'client',
+    subjectClientId: 'client',
     userId: TOKEN_ID,
     grantId: 'grant',
     scope: ['happyfox:read'],
     requestedScope: ['happyfox:read'],
+    resource: 'https://worker.test/mcp',
     props,
+    env,
   };
 }
 
