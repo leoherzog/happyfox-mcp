@@ -34,12 +34,16 @@
       "binding": "OAUTH_KV",
       "id": "bca2a23940a44b1f8e23939b1f71e5c8"
     }
-  ]
+  ],
+
+  // Deploys replace every plain-text variable with this block, so set them here, not in the dashboard.
+  "vars": {
+    // Browser origins allowed to call /mcp; `*` matches any port. A request without an Origin
+    // header, as from any non-browser MCP client, is always allowed.
+    "ALLOWED_ORIGINS": "http://localhost:*,https://localhost:*"
+  }
 
   // Required secrets (set via: wrangler secret put <NAME>):
   //   CREDENTIAL_ENCRYPTION_KEY - 32-byte base64 key for AES-256-GCM credential encryption
   //                               Generate with: openssl rand -base64 32
-  //
-  // Environment variables (set in Cloudflare dashboard or via wrangler secret):
-  //   ALLOWED_ORIGINS - Comma-separated list of allowed CORS origins (default: localhost)
 }

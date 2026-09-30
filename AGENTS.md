@@ -507,8 +507,8 @@ The project uses Cloudflare Workers' built-in TypeScript support - no build step
 
 ## Environment Variables
 
-Set in `wrangler.jsonc` or the Cloudflare Dashboard:
-- `ALLOWED_ORIGINS` - (Optional) Comma-separated list of allowed CORS origins. Defaults to `http://localhost:*` and `https://localhost:*`
+Set under `vars` in `wrangler.jsonc`. Every deploy replaces the Worker's plain-text variables with that block, so a variable added only in the dashboard is removed by the next deploy:
+- `ALLOWED_ORIGINS` - Comma-separated browser origins allowed to call `/mcp`; `*` matches any port. Set to `http://localhost:*,https://localhost:*`, which is also the code's default when the variable is absent. A request without an `Origin` header is always allowed
 
 **KV Namespace Binding:** `OAUTH_KV`, for encrypted credential storage. Create it with `wrangler kv namespace create OAUTH_KV`, then bind it either in `wrangler.jsonc` or under **Workers & Pages** > your worker > **Settings** > **Bindings** > **KV Namespace Bindings**.
 
